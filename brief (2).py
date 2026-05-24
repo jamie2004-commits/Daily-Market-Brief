@@ -320,9 +320,11 @@ def build_pdf(out_path, sgt_date_str, us_close_str, prices, drivers, catalysts):
 # ---------- Email ----------
 
 def send_email(pdf_path, recipient, gmail_user, gmail_pw, subject, sgt_date_str):
+    # Support comma-separated list of recipients in the RECIPIENT_EMAIL secret
+    recipients = [r.strip() for r in recipient.split(",") if r.strip()]
     msg = MIMEMultipart()
     msg["From"] = gmail_user
-    msg["To"] = recipient
+    msg["To"] = ", ".join(recipients)
     msg["Subject"] = subject
     text = (
         f"Your daily market brief for {sgt_date_str} is attached.\n\n"
