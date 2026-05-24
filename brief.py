@@ -135,7 +135,7 @@ Rules:
 - Exactly 3 drivers, ordered by market impact.
 - impacted_tickers: 3-5 real US-listed ticker symbols per driver. Standard symbols only (AAPL, NVDA, JPM, XLE, etc.). Never invent tickers.
 - sources: 1-2 real article URLs per driver from your search results.
-- catalysts_ahead: 5-8 items covering the next 1-2 weeks. Include FOMC / Fed meetings and speeches, US government and policy announcements, major economic data releases (CPI, PCE, GDP, NFP, jobless claims, retail sales, etc.), and major upcoming earnings (use real ticker symbols). Use real dates. Order chronologically.
+- catalysts_ahead: items scheduled in the next 3 calendar days from today ({sgt_date_str}). Could be 1-6 items depending on what's on the calendar. Include FOMC / Fed meetings and speeches, US government and policy announcements, major economic data releases (CPI, PCE, GDP, NFP, jobless claims, retail sales, etc.), and major upcoming earnings (use real ticker symbols). Use real dates. Order chronologically.
 - Output ONLY the JSON object. Nothing before or after."""
 
 
@@ -155,13 +155,15 @@ def _extract_json(text):
     raise ValueError(f"Could not parse JSON from model output:\n{text[:500]}")
 
 
-def synthesize(prices, gemini_key, us_close_str):
+def synthesize(prices, gemini_key, us_close_str, sgt_date_str):
     client = genai.Client(api_key=gemini_key)
     prices_block = "\n".join(
         f"- {p['display']}: {p['close']:.2f} ({p['pct']:+.2f}%)" for p in prices
     )
     prompt = PROMPT_TEMPLATE.format(
-        us_close_str=us_close_str, prices_block=prices_block,
+        us_close_str=us_close_str,
+        sgt_date_str=sgt_date_str,
+        prices_block=prices_block,
     )
     grounding_tool = types.Tool(google_search=types.GoogleSearch())
     config = types.GenerateContentConfig(
@@ -278,11 +280,12 @@ def build_pdf(out_path, sgt_date_str, us_close_str, prices, drivers, catalysts):
                 f'<i>Impacted:</i>&nbsp;&nbsp;{"  ·  ".join(parts)}', body))
         if d.get("sources"):
             links = [
-                f'<a href="{s["url"]}" color="#888888">{s.get("title", s["url"])}</a>'
+                f'<a href="{s["url"]}"><font color="#1a5fb4"><u>{s.get("title", s["url"])}</u></font></a>'
                 for s in d["sources"][:2] if s.get("url")
             ]
             if links:
-                block.append(Paragraph(f"Sources: {' · '.join(links)}", src))
+                block.append(Paragraph(
+                    f"Read more: {' &nbsp;·&nbsp; '.join(links)}", src))
         story.append(KeepTogether(block))
         story.append(Spacer(1, 12))
 
@@ -374,7 +377,7 @@ def main():
     print(f"US close covered: {us_close_str}, {len(prices)} tickers")
 
     print("Calling Gemini (synthesis + Google Search grounding)...")
-    brief_data = synthesize(prices, gemini_key, us_close_str)
+    brief_data = synthesize(prices, gemini_key, us_close_str, sgt_date_str)
 
     print("Verifying impacted tickers against yfinance...")
     drivers = verify_drivers(brief_data["drivers"])
