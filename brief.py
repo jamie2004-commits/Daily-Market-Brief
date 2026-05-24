@@ -15,6 +15,7 @@ import re
 import smtplib
 import ssl
 import sys
+import urllib.parse
 from datetime import datetime
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
@@ -120,10 +121,7 @@ Use Google Search to find the day's top market-moving news. Then output ONLY a J
     {{
       "headline": "Short punchy headline under 12 words",
       "body": "4-6 sentences explaining what happened, why it mattered, and how the market reacted. Specific and factual.",
-      "impacted_tickers": ["TICKER1", "TICKER2", "TICKER3", "TICKER4"],
-      "sources": [
-        {{"title": "Article title", "url": "https://..."}}
-      ]
+      "impacted_tickers": ["TICKER1", "TICKER2", "TICKER3", "TICKER4"]
     }}
   ],
   "catalysts_ahead": [
@@ -134,7 +132,7 @@ Use Google Search to find the day's top market-moving news. Then output ONLY a J
 Rules:
 - Exactly 3 drivers, ordered by market impact.
 - impacted_tickers: 3-5 real US-listed ticker symbols per driver. Standard symbols only (AAPL, NVDA, JPM, XLE, etc.). Never invent tickers.
-- sources: 1-2 real article URLs per driver from your search results.
+- Make headlines specific enough that someone searching for them on Google News will find the actual articles you're referencing.
 - catalysts_ahead: items scheduled in the next 3 calendar days from today ({sgt_date_str}). Could be 1-6 items depending on what's on the calendar. Include FOMC / Fed meetings and speeches, US government and policy announcements, major economic data releases (CPI, PCE, GDP, NFP, jobless claims, retail sales, etc.), and major upcoming earnings (use real ticker symbols). Use real dates. Order chronologically.
 - Output ONLY the JSON object. Nothing before or after."""
 
@@ -278,22 +276,40 @@ def build_pdf(out_path, sgt_date_str, us_close_str, prices, drivers, catalysts):
             block.append(Spacer(1, 4))
             block.append(Paragraph(
                 f'<i>Impacted:</i>&nbsp;&nbsp;{"  ·  ".join(parts)}', body))
-        if d.get("sources"):
-            links = [
-                f'<a href="{s["url"]}"><font color="#1a5fb4"><u>{s.get("title", s["url"])}</u></font></a>'
-                for s in d["sources"][:2] if s.get("url")
-            ]
-            if links:
-                block.append(Paragraph(
-                    f"Read more: {' &nbsp;·&nbsp; '.join(links)}", src))
+        # Generate a Google News search link based on the headline
+        # This avoids broken grounding-redirect URLs from Gemini
+        q = urllib.parse.quote_plus(d["headline"])
+        news_url = f"https://news.google.com/search?q={q}"
+        block.append(Paragraph(
+            f'<a href="{news_url}"><font color="#1a5fb4"><u>Find articles on Google News &rarr;</u></font></a>',
+            src))
         story.append(KeepTogether(block))
         story.append(Spacer(1, 12))
 
     # Catalysts ahead
     story.append(Spacer(1, 4))
     story.append(Paragraph("Catalysts ahead", h2))
-    story.append(Paragraph("Major announcements, Fed events, economic data, earnings", muted))
-    cd = [[c["date"], c["event"]] for c in catalysts]
+    story.append(Paragraph("Next 3 days · Fed events, data releases, earnings", muted))
+
+    # Group catalysts by day so the date appears once per group
+    from itertools import groupby
+    grouped = []
+    for date, group in groupby(catalysts, key=lambda x: x["date"]):
+        grouped.append((date, [g["event"] for g in group]))
+
+    cd = []
+    spans = []
+    last_row_of_day = []  # for separator lines between day groups
+    row_idx = 0
+    for date, events in grouped:
+        start_row = row_idx
+        for j, event in enumerate(events):
+            cd.append([date if j == 0 else "", event])
+            row_idx += 1
+        if len(events) > 1:
+            spans.append(("SPAN", (0, start_row), (0, row_idx - 1)))
+        last_row_of_day.append(row_idx - 1)
+
     ct = Table(cd, colWidths=[3.5*cm, 13*cm])
     cst = [
         ("FONT", (0,0), (-1,-1), "Helvetica", 9.5),
@@ -302,9 +318,10 @@ def build_pdf(out_path, sgt_date_str, us_close_str, prices, drivers, catalysts):
         ("VALIGN", (0,0), (-1,-1), "TOP"),
         ("TOPPADDING", (0,0), (-1,-1), 6),
         ("BOTTOMPADDING", (0,0), (-1,-1), 6),
-    ]
-    for i in range(len(cd) - 1):
-        cst.append(("LINEBELOW", (0,i), (-1,i), 0.25, COL_BORDER_LIGHT))
+    ] + spans
+    # Add separator lines between day groups (not within a day's events)
+    for end_row in last_row_of_day[:-1]:
+        cst.append(("LINEBELOW", (0, end_row), (-1, end_row), 0.25, COL_BORDER_LIGHT))
     ct.setStyle(TableStyle(cst))
     story.append(ct)
 
