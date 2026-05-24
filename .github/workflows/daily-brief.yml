@@ -1,0 +1,27 @@
+name: Daily market brief
+
+on:
+  schedule:
+    # 00:00 UTC Tue-Sat = 8:00am SGT Tue-Sat
+    # Covers US Mon-Fri trading sessions
+    - cron: '0 0 * * 2-6'
+  workflow_dispatch: {}
+
+jobs:
+  brief:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Generate and email brief
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+        run: python brief.py
