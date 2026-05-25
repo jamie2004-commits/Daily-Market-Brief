@@ -109,12 +109,18 @@ def get_ticker_pct(symbol):
 
 # ---------- LLM synthesis ----------
 
-PROMPT_TEMPLATE = """You are writing a US equity market post-close summary covering the US session of {us_close_str}.
+PROMPT_TEMPLATE = """You are writing a US equity market post-close summary for a Singapore-based reader who will read this at 8am SGT on {sgt_date_str}.
+
+The most recent US trading session closed on {us_close_str}.
+
+COVERAGE WINDOW: {coverage_window}
 
 Official close prices from Yahoo Finance:
 {prices_block}
 
-Use Google Search to find the day's top market-moving news. Then output ONLY a JSON object (no markdown fences, no preamble, no commentary) with this exact structure:
+Use Google Search to find the most market-relevant news within the coverage window above. Search aggressively for fresh items — perform multiple searches if needed (e.g. "market news {sgt_date_str}", "weekend market developments", "{us_close_str} stocks", "Asia market reaction"). Prioritize stories published within the last 48–72 hours over older ones.
+
+Then output ONLY a JSON object (no markdown fences, no preamble, no commentary) with this exact structure:
 
 {{
   "drivers": [
@@ -130,7 +136,8 @@ Use Google Search to find the day's top market-moving news. Then output ONLY a J
 }}
 
 Rules:
-- Exactly 3 drivers, ordered by market impact.
+- Exactly 3 drivers, ordered by market impact across the full coverage window (not just Friday's close).
+- If the coverage window includes a weekend, at least one driver should reflect weekend developments when material weekend news exists (geopolitics, central bank commentary, political announcements, M&A, Asia open reactions, commodity moves). Do NOT pad with stale Friday recap if fresher weekend news exists.
 - impacted_tickers: 3-5 real US-listed ticker symbols per driver. Standard symbols only (AAPL, NVDA, JPM, XLE, etc.). Never invent tickers.
 - Make headlines specific enough that someone searching for them on Google News will find the actual articles you're referencing.
 - catalysts_ahead: items scheduled in the next 3 calendar days from today ({sgt_date_str}). Could be 1-6 items depending on what's on the calendar. Include FOMC / Fed meetings and speeches, US government and policy announcements, major economic data releases (CPI, PCE, GDP, NFP, jobless claims, retail sales, etc.), and major upcoming earnings (use real ticker symbols). Use real dates. Order chronologically.
@@ -153,7 +160,7 @@ def _extract_json(text):
     raise ValueError(f"Could not parse JSON from model output:\n{text[:500]}")
 
 
-def synthesize(prices, gemini_key, us_close_str, sgt_date_str):
+def synthesize(prices, gemini_key, us_close_str, sgt_date_str, coverage_window):
     client = genai.Client(api_key=gemini_key)
     prices_block = "\n".join(
         f"- {p['display']}: {p['close']:.2f} ({p['pct']:+.2f}%)" for p in prices
@@ -161,6 +168,7 @@ def synthesize(prices, gemini_key, us_close_str, sgt_date_str):
     prompt = PROMPT_TEMPLATE.format(
         us_close_str=us_close_str,
         sgt_date_str=sgt_date_str,
+        coverage_window=coverage_window,
         prices_block=prices_block,
     )
     grounding_tool = types.Tool(google_search=types.GoogleSearch())
@@ -393,8 +401,25 @@ def main():
     us_close_str = us_close_date.strftime("%A, %B %d")
     print(f"US close covered: {us_close_str}, {len(prices)} tickers")
 
+    # Coverage window — widen on Tuesday SGT to include weekend
+    sgt_weekday = sgt_now.weekday()  # Mon=0, Tue=1, ... Sat=5
+    if sgt_weekday == 1:  # Tuesday SGT — Monday US session + preceding weekend
+        coverage_window = (
+            f"Cover the {us_close_str} US trading session AND any market-moving "
+            f"news from the preceding weekend (Saturday and Sunday). Weekend news "
+            f"often drives Monday's open — do not ignore it."
+        )
+    elif sgt_weekday == 2:  # Wednesday SGT — covers Tue US, but early-week news may still be fresh
+        coverage_window = (
+            f"Cover the {us_close_str} US trading session. Include any weekend or "
+            f"early-week developments still moving markets if relevant."
+        )
+    else:
+        coverage_window = f"Cover the {us_close_str} US trading session."
+    print(f"Coverage window: {coverage_window}")
+
     print("Calling Gemini (synthesis + Google Search grounding)...")
-    brief_data = synthesize(prices, gemini_key, us_close_str, sgt_date_str)
+    brief_data = synthesize(prices, gemini_key, us_close_str, sgt_date_str, coverage_window)
 
     print("Verifying impacted tickers against yfinance...")
     drivers = verify_drivers(brief_data["drivers"])
