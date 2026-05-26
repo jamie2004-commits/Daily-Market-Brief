@@ -153,12 +153,15 @@ PROMPT_TEMPLATE = """You are writing a US equity market summary for a reader in 
 Context:
 - The reader is opening this brief on {sgt_date_str} (Singapore time).
 - The most recent completed US trading session was {us_close_str}.
+- The current trading week runs from {week_mon_str} through {week_fri_str}.
 - If those two dates are several days apart — for example, it is Monday morning SGT and the last US close was the previous Friday, or there was a US holiday in between — then a weekend or holiday gap exists. In that case, your news section MUST cover relevant developments from across that gap, not just the trading day itself.
 
 Latest close per asset (from Yahoo Finance):
 {prices_block}
 
 {stale_block}
+
+In addition to the past closures already evident from the stale data above, use Google Search to find any OTHER full-day equity market closures occurring during this week ({week_mon_str} to {week_fri_str}, Monday through Friday inclusive). Check the official holiday calendars for major exchanges in: United States (NYSE/Nasdaq), United Kingdom (LSE), Eurozone (Xetra/Euronext), Japan (TSE), Korea (KRX), Hong Kong (HKEX), China (SSE/SZSE), Singapore (SGX), Australia (ASX). Include both PAST closures (already happened this week) AND UPCOMING closures (later this week).
 
 Use Google Search to find the day's top market-moving news. Cover both the US trading session of {us_close_str} AND any market-relevant news that happened between that close and {sgt_date_str} — including weekends, holidays, after-hours moves, and any major Asian session developments since.
 
@@ -176,7 +179,9 @@ Then output ONLY a JSON object (no markdown fences, no preamble, no commentary) 
     {{"date": "Tue, May 26", "event": "Specific event description"}}
   ],
   "market_closures": [
-    {{"markets": "S&P 500, Nasdaq, Dow, Russell 2000, VIX, US 10Y, DXY", "date": "Mon, May 25", "reason": "Memorial Day (US federal holiday)"}}
+    {{"date": "Mon, May 25", "markets": "US", "reason": "Memorial Day"}},
+    {{"date": "Mon, May 25", "markets": "Korea, Hong Kong", "reason": "Buddha's Birthday"}},
+    {{"date": "Wed, May 27", "markets": "Singapore", "reason": "Hari Raya Haji"}}
   ]
 }}
 
@@ -185,7 +190,7 @@ Rules:
 - impacted_tickers: 3-5 real US-listed ticker symbols per driver. Standard symbols only (AAPL, NVDA, JPM, XLE, etc.). Never invent tickers.
 - Make headlines specific enough that someone searching for them on Google News will find the actual articles you're referencing.
 - catalysts_ahead: items scheduled in the next 3 calendar days from today ({sgt_date_str}). Could be 1-6 items depending on what's on the calendar. Include FOMC / Fed meetings and speeches, US government and policy announcements, major economic data releases (CPI, PCE, GDP, NFP, jobless claims, retail sales, etc.), and major upcoming earnings (use real ticker symbols). Use real dates. Order chronologically.
-- market_closures: include one entry for EACH distinct holiday that closed any of the stale markets listed above. Group markets affected by the SAME holiday (same country, same date, same reason) into a single entry. Identify holidays for ALL affected countries — US, Japan, Korea, Hong Kong, Singapore — separately. If no stale markets are listed, return an empty array.
+- market_closures: one entry per (date, holiday) pair. "markets" must be country names only (US, UK, Japan, Korea, Hong Kong, Singapore, China, Eurozone, Australia) — NEVER ticker symbols or index names. Group multiple countries observing the same holiday on the same date into one entry. Cover the FULL week {week_mon_str} to {week_fri_str}: include past closures already in the stale list AND any upcoming closures you find via search. Order chronologically. If no closures, return [].
 - Output ONLY the JSON object. Nothing before or after."""
 
 
@@ -205,7 +210,8 @@ def _extract_json(text):
     raise ValueError(f"Could not parse JSON from model output:\n{text[:500]}")
 
 
-def synthesize(prices, gemini_key, us_close_str, sgt_date_str, stale_markets):
+def synthesize(prices, gemini_key, us_close_str, sgt_date_str,
+               stale_markets, week_mon_str, week_fri_str):
     client = genai.Client(api_key=gemini_key)
     prices_block = "\n".join(
         f"- {p['display']}: {p['close']:.2f} ({p['pct']:+.2f}%) — latest close {p['date'].strftime('%a %b %d')}"
@@ -218,18 +224,16 @@ def synthesize(prices, gemini_key, us_close_str, sgt_date_str, stale_markets):
             for s in stale_markets
         )
         stale_block = (
-            "STALE MARKETS — these specific markets have a latest-close date "
+            "STALE MARKETS — the following assets have a latest-close date "
             "older than normal trading would explain, meaning they were closed "
             "for a holiday or unusual event. You MUST identify the SPECIFIC "
-            "public holiday in each market's home country (US, Japan, Korea, "
-            "Hong Kong, Singapore, etc.) using Google Search. Do not skip any "
-            "country. List ALL of them in market_closures:\n\n"
+            "public holiday in each market's home country:\n\n"
             + stale_lines
         )
     else:
         stale_block = (
-            "All markets have current latest-close dates consistent with "
-            "normal trading. Return an empty market_closures array []."
+            "All assets have current latest-close dates consistent with "
+            "normal trading; no past closures detected from data."
         )
 
     prompt = PROMPT_TEMPLATE.format(
@@ -237,6 +241,8 @@ def synthesize(prices, gemini_key, us_close_str, sgt_date_str, stale_markets):
         sgt_date_str=sgt_date_str,
         prices_block=prices_block,
         stale_block=stale_block,
+        week_mon_str=week_mon_str,
+        week_fri_str=week_fri_str,
     )
     grounding_tool = types.Tool(google_search=types.GoogleSearch())
     config = types.GenerateContentConfig(
@@ -333,24 +339,57 @@ def build_pdf(out_path, sgt_date_str, us_close_str, prices, drivers, catalysts, 
     snap.setStyle(TableStyle(st))
     story.append(snap)
 
-    # Market closures note (between snapshot and drivers)
+    # Market holidays this week (grouped by date)
     if market_closures:
-        parts = []
-        for c in market_closures:
-            markets = c.get("markets", "")
-            date = c.get("date", "")
-            reason = c.get("reason", "")
-            if markets and date and reason:
-                parts.append(f"<b>{markets}</b> closed {date} — {reason}")
-        if parts:
-            closures_style = ParagraphStyle(
-                "closures", fontName="Helvetica-Oblique", fontSize=8.5,
-                textColor=COL_DIM, leading=11, spaceBefore=6, spaceAfter=2,
-                leftIndent=0,
-            )
-            story.append(Spacer(1, 6))
-            for line in parts:
-                story.append(Paragraph(f"<i>Note:</i> {line}", closures_style))
+        story.append(Spacer(1, 14))
+        story.append(Paragraph("Market holidays this week", h3))
+        story.append(Spacer(1, 4))
+
+        # Group entries by date so date column merges naturally
+        from itertools import groupby
+        closures_grouped = []
+        for date_str, group in groupby(market_closures, key=lambda x: x.get("date", "")):
+            entries = []
+            for c in group:
+                markets = c.get("markets", "")
+                reason = c.get("reason", "")
+                if markets and reason:
+                    entries.append((markets, reason))
+            if entries:
+                closures_grouped.append((date_str, entries))
+
+        if closures_grouped:
+            cl_data = []
+            cl_spans = []
+            cl_last_row_of_day = []
+            row_idx = 0
+            for date_str, entries in closures_grouped:
+                start_row = row_idx
+                for j, (markets, reason) in enumerate(entries):
+                    cl_data.append([
+                        date_str if j == 0 else "",
+                        markets,
+                        reason,
+                    ])
+                    row_idx += 1
+                if len(entries) > 1:
+                    cl_spans.append(("SPAN", (0, start_row), (0, row_idx - 1)))
+                cl_last_row_of_day.append(row_idx - 1)
+
+            cl_table = Table(cl_data, colWidths=[3.2*cm, 5.5*cm, 7.8*cm])
+            cl_style = [
+                ("FONT", (0,0), (-1,-1), "Helvetica", 9),
+                ("TEXTCOLOR", (0,0), (0,-1), COL_MUTED),
+                ("TEXTCOLOR", (1,0), (1,-1), COL_TEXT),
+                ("TEXTCOLOR", (2,0), (2,-1), COL_MUTED),
+                ("VALIGN", (0,0), (-1,-1), "TOP"),
+                ("TOPPADDING", (0,0), (-1,-1), 5),
+                ("BOTTOMPADDING", (0,0), (-1,-1), 5),
+            ] + cl_spans
+            for end_row in cl_last_row_of_day[:-1]:
+                cl_style.append(("LINEBELOW", (0, end_row), (-1, end_row), 0.25, COL_BORDER_LIGHT))
+            cl_table.setStyle(TableStyle(cl_style))
+            story.append(cl_table)
     story.append(Spacer(1, 18))
 
     # Drivers
@@ -499,8 +538,18 @@ def main():
     else:
         print("  No stale markets detected.")
 
+    # Current trading-week Monday and Friday in SGT
+    week_mon = sgt_date - timedelta(days=sgt_date.weekday())
+    week_fri = week_mon + timedelta(days=4)
+    week_mon_str = week_mon.strftime("%a, %b %d")
+    week_fri_str = week_fri.strftime("%a, %b %d")
+    print(f"  Week scope for closure detection: {week_mon_str} – {week_fri_str}")
+
     print("Calling Gemini (synthesis + Google Search grounding)...")
-    brief_data = synthesize(prices, gemini_key, us_close_str, sgt_date_str, stale_markets)
+    brief_data = synthesize(
+        prices, gemini_key, us_close_str, sgt_date_str,
+        stale_markets, week_mon_str, week_fri_str,
+    )
 
     print("Verifying impacted tickers against yfinance...")
     drivers = verify_drivers(brief_data["drivers"])
