@@ -71,22 +71,31 @@ COL_NEG = colors.HexColor("#b8243c")
 
 def fetch_prices():
     out = []
+    today_sgt = datetime.now(ZoneInfo("Asia/Singapore")).date()
     for symbol, display, kind in TICKERS:
         try:
-            hist = yf.Ticker(symbol).history(period="5d")
+            hist = yf.Ticker(symbol).history(period="10d")
             if len(hist) < 2:
                 print(f"  WARN: only {len(hist)} bars for {symbol}, skipping")
                 continue
-            close = float(hist["Close"].iloc[-1])
-            prev = float(hist["Close"].iloc[-2])
+            # Filter out today's bar — for Asian indices, yfinance may
+            # return an intraday bar dated today while the market is still
+            # open. We want only fully completed daily closes.
+            completed = hist[hist.index.date < today_sgt]
+            if len(completed) < 2:
+                print(f"  WARN: only {len(completed)} completed bars for {symbol}, skipping")
+                continue
+            close = float(completed["Close"].iloc[-1])
+            prev = float(completed["Close"].iloc[-2])
             pct = (close - prev) / prev * 100.0
+            close_date = completed.index[-1].date()
             out.append({
                 "symbol": symbol,
                 "display": display,
                 "kind": kind,
                 "close": close,
                 "pct": pct,
-                "date": hist.index[-1].date(),
+                "date": close_date,
             })
         except Exception as e:
             print(f"  ERROR fetching {symbol}: {e}")
@@ -95,11 +104,13 @@ def fetch_prices():
 
 def get_ticker_pct(symbol):
     try:
-        hist = yf.Ticker(symbol).history(period="5d")
-        if len(hist) < 2:
+        today_sgt = datetime.now(ZoneInfo("Asia/Singapore")).date()
+        hist = yf.Ticker(symbol).history(period="10d")
+        completed = hist[hist.index.date < today_sgt]
+        if len(completed) < 2:
             return None
-        close = float(hist["Close"].iloc[-1])
-        prev = float(hist["Close"].iloc[-2])
+        close = float(completed["Close"].iloc[-1])
+        prev = float(completed["Close"].iloc[-2])
         return (close - prev) / prev * 100.0
     except Exception:
         return None
@@ -417,10 +428,12 @@ def main():
         print("FATAL: fewer than 3 tickers fetched; aborting")
         sys.exit(1)
 
-    # US close date = most recent close that yfinance returned (yesterday in US terms)
-    # We pick this from a US-only ticker to avoid Asian holidays misleading us.
-    us_symbols = {"^GSPC", "^IXIC", "^DJI", "^RUT", "^VIX", "^TNX", "DX-Y.NYB"}
-    us_ticker_dates = [p["date"] for p in prices if p["symbol"] in us_symbols]
+    # US close date = most recent close from the US EQUITY indexes only.
+    # We deliberately exclude VIX/TNX/DXY here because rates and FX can
+    # carry a different "latest date" than equities (FX trades 24h), which
+    # would otherwise mislabel the brief's subtitle.
+    us_equity_symbols = {"^GSPC", "^IXIC", "^DJI", "^RUT"}
+    us_ticker_dates = [p["date"] for p in prices if p["symbol"] in us_equity_symbols]
     us_close_date = max(us_ticker_dates) if us_ticker_dates else prices[0]["date"]
     us_close_str = us_close_date.strftime("%A, %B %d")
     print(f"US close covered: {us_close_str}, {len(prices)} tickers")
