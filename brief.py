@@ -16,7 +16,7 @@ import smtplib
 import ssl
 import sys
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -116,6 +116,36 @@ def get_ticker_pct(symbol):
         return None
 
 
+# ---------- Stale market detection ----------
+
+def _expected_gap_days(today_sgt):
+    """How many calendar days back the latest close should be on a normal day,
+    accounting for weekends. Returns 1 on Tue-Sat, 3 on Mon, 2 on Sun."""
+    weekday = today_sgt.weekday()  # 0=Mon, 6=Sun
+    if weekday == 0:
+        return 3  # Monday → expect Friday's close
+    if weekday == 6:
+        return 2  # Sunday → expect Friday's close
+    return 1      # Tue-Sat → expect yesterday's close
+
+
+def detect_stale_markets(prices, today_sgt):
+    """Identify tickers whose latest close is older than normal trading
+    would explain. These are candidates for holiday closures."""
+    expected_gap = _expected_gap_days(today_sgt)
+    stale = []
+    for p in prices:
+        actual_gap = (today_sgt - p["date"]).days
+        if actual_gap > expected_gap:
+            stale.append({
+                "display": p["display"],
+                "symbol": p["symbol"],
+                "latest_close": p["date"].strftime("%a, %b %d"),
+                "extra_days": actual_gap - expected_gap,
+            })
+    return stale
+
+
 # ---------- LLM synthesis ----------
 
 PROMPT_TEMPLATE = """You are writing a US equity market summary for a reader in Singapore.
@@ -128,7 +158,7 @@ Context:
 Latest close per asset (from Yahoo Finance):
 {prices_block}
 
-Some of the assets above may show a latest close date that is older than expected for the SGT read date {sgt_date_str}. That can indicate a market closure (public holiday, exchange closure). Use Google Search to identify any specific holidays that closed these markets and include them in the "market_closures" field of your output.
+{stale_block}
 
 Use Google Search to find the day's top market-moving news. Cover both the US trading session of {us_close_str} AND any market-relevant news that happened between that close and {sgt_date_str} — including weekends, holidays, after-hours moves, and any major Asian session developments since.
 
@@ -155,7 +185,7 @@ Rules:
 - impacted_tickers: 3-5 real US-listed ticker symbols per driver. Standard symbols only (AAPL, NVDA, JPM, XLE, etc.). Never invent tickers.
 - Make headlines specific enough that someone searching for them on Google News will find the actual articles you're referencing.
 - catalysts_ahead: items scheduled in the next 3 calendar days from today ({sgt_date_str}). Could be 1-6 items depending on what's on the calendar. Include FOMC / Fed meetings and speeches, US government and policy announcements, major economic data releases (CPI, PCE, GDP, NFP, jobless claims, retail sales, etc.), and major upcoming earnings (use real ticker symbols). Use real dates. Order chronologically.
-- market_closures: ONLY include entries where a market was unusually closed due to a specific holiday. Group instruments closed on the same date for the same reason into a single entry (e.g. all US instruments closed for Memorial Day → one entry). Do NOT include normal weekends as closures. If no markets were unusually closed, return an empty array [].
+- market_closures: include one entry for EACH distinct holiday that closed any of the stale markets listed above. Group markets affected by the SAME holiday (same country, same date, same reason) into a single entry. Identify holidays for ALL affected countries — US, Japan, Korea, Hong Kong, Singapore — separately. If no stale markets are listed, return an empty array.
 - Output ONLY the JSON object. Nothing before or after."""
 
 
@@ -175,16 +205,38 @@ def _extract_json(text):
     raise ValueError(f"Could not parse JSON from model output:\n{text[:500]}")
 
 
-def synthesize(prices, gemini_key, us_close_str, sgt_date_str):
+def synthesize(prices, gemini_key, us_close_str, sgt_date_str, stale_markets):
     client = genai.Client(api_key=gemini_key)
     prices_block = "\n".join(
         f"- {p['display']}: {p['close']:.2f} ({p['pct']:+.2f}%) — latest close {p['date'].strftime('%a %b %d')}"
         for p in prices
     )
+
+    if stale_markets:
+        stale_lines = "\n".join(
+            f"- {s['display']}: latest close {s['latest_close']} (older than expected by {s['extra_days']} day(s))"
+            for s in stale_markets
+        )
+        stale_block = (
+            "STALE MARKETS — these specific markets have a latest-close date "
+            "older than normal trading would explain, meaning they were closed "
+            "for a holiday or unusual event. You MUST identify the SPECIFIC "
+            "public holiday in each market's home country (US, Japan, Korea, "
+            "Hong Kong, Singapore, etc.) using Google Search. Do not skip any "
+            "country. List ALL of them in market_closures:\n\n"
+            + stale_lines
+        )
+    else:
+        stale_block = (
+            "All markets have current latest-close dates consistent with "
+            "normal trading. Return an empty market_closures array []."
+        )
+
     prompt = PROMPT_TEMPLATE.format(
         us_close_str=us_close_str,
         sgt_date_str=sgt_date_str,
         prices_block=prices_block,
+        stale_block=stale_block,
     )
     grounding_tool = types.Tool(google_search=types.GoogleSearch())
     config = types.GenerateContentConfig(
@@ -438,8 +490,17 @@ def main():
     us_close_str = us_close_date.strftime("%A, %B %d")
     print(f"US close covered: {us_close_str}, {len(prices)} tickers")
 
+    print("Detecting market closures...")
+    stale_markets = detect_stale_markets(prices, sgt_date)
+    if stale_markets:
+        print(f"  {len(stale_markets)} stale markets (likely holiday closures):")
+        for s in stale_markets:
+            print(f"    - {s['display']}: latest {s['latest_close']} (+{s['extra_days']}d)")
+    else:
+        print("  No stale markets detected.")
+
     print("Calling Gemini (synthesis + Google Search grounding)...")
-    brief_data = synthesize(prices, gemini_key, us_close_str, sgt_date_str)
+    brief_data = synthesize(prices, gemini_key, us_close_str, sgt_date_str, stale_markets)
 
     print("Verifying impacted tickers against yfinance...")
     drivers = verify_drivers(brief_data["drivers"])
