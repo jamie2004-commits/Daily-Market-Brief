@@ -40,7 +40,7 @@ from reportlab.platypus import (
 TICKERS = [
     # US indices
     ("^GSPC", "S&P 500", "index"),
-    ("^NDX", "Nasdaq 100", "index"),
+    ("^IXIC", "Nasdaq", "index"),
     ("^DJI", "Dow Jones", "index"),
     ("^RUT", "Russell 2000", "index"),
     # Asian indices
@@ -55,8 +55,6 @@ TICKERS = [
     # Commodities
     ("GC=F", "Gold", "commodity"),
     ("CL=F", "WTI crude", "commodity"),
-    # Crypto
-    ("BTC-USD", "Bitcoin", "crypto"),
 ]
 
 # ---------- Colors ----------
@@ -109,12 +107,21 @@ def get_ticker_pct(symbol):
 
 # ---------- LLM synthesis ----------
 
-PROMPT_TEMPLATE = """You are writing a US equity market post-close summary covering the US session of {us_close_str}.
+PROMPT_TEMPLATE = """You are writing a US equity market summary for a reader in Singapore.
 
-Official close prices from Yahoo Finance:
+Context:
+- The reader is opening this brief on {sgt_date_str} (Singapore time).
+- The most recent completed US trading session was {us_close_str}.
+- If those two dates are several days apart — for example, it is Monday morning SGT and the last US close was the previous Friday, or there was a US holiday in between — then a weekend or holiday gap exists. In that case, your news section MUST cover relevant developments from across that gap, not just the trading day itself.
+
+Latest close per asset (from Yahoo Finance):
 {prices_block}
 
-Use Google Search to find the day's top market-moving news. Then output ONLY a JSON object (no markdown fences, no preamble, no commentary) with this exact structure:
+Some of the assets above may show a latest close date that is older than expected for the SGT read date {sgt_date_str}. That can indicate a market closure (public holiday, exchange closure). Use Google Search to identify any specific holidays that closed these markets and include them in the "market_closures" field of your output.
+
+Use Google Search to find the day's top market-moving news. Cover both the US trading session of {us_close_str} AND any market-relevant news that happened between that close and {sgt_date_str} — including weekends, holidays, after-hours moves, and any major Asian session developments since.
+
+Then output ONLY a JSON object (no markdown fences, no preamble, no commentary) with this exact structure:
 
 {{
   "drivers": [
@@ -126,14 +133,18 @@ Use Google Search to find the day's top market-moving news. Then output ONLY a J
   ],
   "catalysts_ahead": [
     {{"date": "Tue, May 26", "event": "Specific event description"}}
+  ],
+  "market_closures": [
+    {{"markets": "S&P 500, Nasdaq, Dow, Russell 2000, VIX, US 10Y, DXY", "date": "Mon, May 25", "reason": "Memorial Day (US federal holiday)"}}
   ]
 }}
 
 Rules:
-- Exactly 3 drivers, ordered by market impact.
+- Exactly 3 drivers, ordered by market impact (most consequential first). On Mondays or post-holiday days, drivers may include weekend / holiday-period developments if they're more important than the previous trading session's headlines.
 - impacted_tickers: 3-5 real US-listed ticker symbols per driver. Standard symbols only (AAPL, NVDA, JPM, XLE, etc.). Never invent tickers.
 - Make headlines specific enough that someone searching for them on Google News will find the actual articles you're referencing.
 - catalysts_ahead: items scheduled in the next 3 calendar days from today ({sgt_date_str}). Could be 1-6 items depending on what's on the calendar. Include FOMC / Fed meetings and speeches, US government and policy announcements, major economic data releases (CPI, PCE, GDP, NFP, jobless claims, retail sales, etc.), and major upcoming earnings (use real ticker symbols). Use real dates. Order chronologically.
+- market_closures: ONLY include entries where a market was unusually closed due to a specific holiday. Group instruments closed on the same date for the same reason into a single entry (e.g. all US instruments closed for Memorial Day → one entry). Do NOT include normal weekends as closures. If no markets were unusually closed, return an empty array [].
 - Output ONLY the JSON object. Nothing before or after."""
 
 
@@ -156,7 +167,8 @@ def _extract_json(text):
 def synthesize(prices, gemini_key, us_close_str, sgt_date_str):
     client = genai.Client(api_key=gemini_key)
     prices_block = "\n".join(
-        f"- {p['display']}: {p['close']:.2f} ({p['pct']:+.2f}%)" for p in prices
+        f"- {p['display']}: {p['close']:.2f} ({p['pct']:+.2f}%) — latest close {p['date'].strftime('%a %b %d')}"
+        for p in prices
     )
     prompt = PROMPT_TEMPLATE.format(
         us_close_str=us_close_str,
@@ -202,7 +214,7 @@ def fmt_pct(pct):
     return f"{sign}{abs(pct):.2f}%"
 
 
-def build_pdf(out_path, sgt_date_str, us_close_str, prices, drivers, catalysts):
+def build_pdf(out_path, sgt_date_str, us_close_str, prices, drivers, catalysts, market_closures=None):
     doc = SimpleDocTemplate(
         out_path, pagesize=A4,
         topMargin=1.6*cm, bottomMargin=1.6*cm,
@@ -257,6 +269,25 @@ def build_pdf(out_path, sgt_date_str, us_close_str, prices, drivers, catalysts):
     snap = Table(data, colWidths=[8*cm, 4*cm, 4*cm])
     snap.setStyle(TableStyle(st))
     story.append(snap)
+
+    # Market closures note (between snapshot and drivers)
+    if market_closures:
+        parts = []
+        for c in market_closures:
+            markets = c.get("markets", "")
+            date = c.get("date", "")
+            reason = c.get("reason", "")
+            if markets and date and reason:
+                parts.append(f"<b>{markets}</b> closed {date} — {reason}")
+        if parts:
+            closures_style = ParagraphStyle(
+                "closures", fontName="Helvetica-Oblique", fontSize=8.5,
+                textColor=COL_DIM, leading=11, spaceBefore=6, spaceAfter=2,
+                leftIndent=0,
+            )
+            story.append(Spacer(1, 6))
+            for line in parts:
+                story.append(Paragraph(f"<i>Note:</i> {line}", closures_style))
     story.append(Spacer(1, 18))
 
     # Drivers
@@ -388,7 +419,8 @@ def main():
 
     # US close date = most recent close that yfinance returned (yesterday in US terms)
     # We pick this from a US-only ticker to avoid Asian holidays misleading us.
-    us_ticker_dates = [p["date"] for p in prices if p["symbol"].startswith("^G") or p["symbol"] == "^NDX" or p["symbol"] == "^DJI"]
+    us_symbols = {"^GSPC", "^IXIC", "^DJI", "^RUT", "^VIX", "^TNX", "DX-Y.NYB"}
+    us_ticker_dates = [p["date"] for p in prices if p["symbol"] in us_symbols]
     us_close_date = max(us_ticker_dates) if us_ticker_dates else prices[0]["date"]
     us_close_str = us_close_date.strftime("%A, %B %d")
     print(f"US close covered: {us_close_str}, {len(prices)} tickers")
@@ -401,8 +433,11 @@ def main():
 
     print("Building PDF...")
     pdf_path = f"/tmp/market-brief-{sgt_date.isoformat()}.pdf"
-    build_pdf(pdf_path, sgt_date_str, us_close_str, prices, drivers,
-              brief_data["catalysts_ahead"])
+    build_pdf(
+        pdf_path, sgt_date_str, us_close_str, prices, drivers,
+        brief_data["catalysts_ahead"],
+        market_closures=brief_data.get("market_closures") or [],
+    )
 
     print(f"Emailing to {recipient}...")
     subject = f"Market brief — {sgt_date.strftime('%a %b %d, %Y')}"
