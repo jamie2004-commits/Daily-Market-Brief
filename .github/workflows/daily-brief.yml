@@ -2,9 +2,9 @@ name: Daily market brief
 
 on:
   schedule:
-    # 00:00 UTC Tue-Sat = 8:00am SGT Tue-Sat
-    # Covers US Mon-Fri trading sessions
-    - cron: '0 0 * * 2-6'
+    # 00:15 UTC Tue-Sat = 8:15am SGT Tue-Sat
+    # 15-min offset avoids GitHub Actions top-of-hour cron congestion
+    - cron: '15 0 * * 2-6'
   workflow_dispatch: {}
 
 jobs:
