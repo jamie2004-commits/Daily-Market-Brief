@@ -15,6 +15,7 @@ import re
 import smtplib
 import ssl
 import sys
+import time
 import urllib.parse
 from datetime import datetime, timedelta
 from email.mime.application import MIMEApplication
@@ -182,15 +183,17 @@ Then output ONLY a JSON object (no markdown fences, no preamble, no commentary) 
     {{"date": "Mon, May 25", "markets": "US", "reason": "Memorial Day"}},
     {{"date": "Mon, May 25", "markets": "Korea, Hong Kong", "reason": "Buddha's Birthday"}},
     {{"date": "Wed, May 27", "markets": "Singapore", "reason": "Hari Raya Haji"}}
-  ]
+  ],
+  "on_the_horizon": "A short prose paragraph (3-5 sentences) covering 2-4 MAJOR upcoming events that sit BEYOND the next 3 days but have significant market implications."
 }}
 
 Rules:
-- Exactly 3 drivers, ordered by market impact (most consequential first). On Mondays or post-holiday days, drivers may include weekend / holiday-period developments if they're more important than the previous trading session's headlines.
+- Exactly 3 drivers, ordered by market impact. Each driver MUST be tied to meaningful price action — typically a 1%+ move in major names, a notable sector move, or a clear inflection in a major index, yield, or commodity. A story being merely newsworthy is NOT enough; if markets didn't react, do not promote it to a driver. If you can't find three high-impact stories, choose the next-most-impactful even if smaller, but never include throwaway commentary or routine policy meetings with negligible market reaction. Prioritize stories from the most recent 24-48 hours when impact is comparable.
 - impacted_tickers: 3-5 real US-listed ticker symbols per driver. Standard symbols only (AAPL, NVDA, JPM, XLE, etc.). Never invent tickers.
 - Make headlines specific enough that someone searching for them on Google News will find the actual articles you're referencing.
 - catalysts_ahead: items scheduled in the next 3 calendar days from today ({sgt_date_str}). Could be 1-6 items depending on what's on the calendar. Include FOMC / Fed meetings and speeches, US government and policy announcements, major economic data releases (CPI, PCE, GDP, NFP, jobless claims, retail sales, etc.), and major upcoming earnings (use real ticker symbols). Use real dates. Order chronologically.
 - market_closures: one entry per (date, holiday) pair. "markets" must be country names only (US, UK, Japan, Korea, Hong Kong, Singapore, China, Eurozone, Australia) — NEVER ticker symbols or index names. Group multiple countries observing the same holiday on the same date into one entry. Cover the FULL week {week_mon_str} to {week_fri_str}: include past closures already in the stale list AND any upcoming closures you find via search. Order chronologically. If no closures, return [].
+- on_the_horizon: a prose paragraph (3-5 sentences, no bullet points, no headers) summarizing 2-4 MAJOR strategic events expected beyond the next 3 days but within roughly the next 2 months. These are forward-looking developments distinct from the daily-calendar catalysts above. Examples of what belongs here: rumored or scheduled IPOs (e.g., SpaceX, Stripe, Klarna), big-deal M&A milestones, antitrust rulings, major product launches (Apple events, Nvidia GTC, etc.), election milestones, central bank decisions further out, OPEC meetings, big sector inflection points. Use Google Search to identify what's actually upcoming. Be specific with names and approximate dates. If genuinely nothing notable is coming up, return a single short sentence acknowledging that — but this should be rare.
 - Output ONLY the JSON object. Nothing before or after."""
 
 
@@ -249,12 +252,43 @@ def synthesize(prices, gemini_key, us_close_str, sgt_date_str,
         tools=[grounding_tool],
         temperature=0.3,
     )
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-        config=config,
-    )
-    return _extract_json(response.text)
+
+    # Retry on transient 503 / 429 / UNAVAILABLE errors with progressive backoff.
+    # If gemini-2.5-flash stays unavailable, fall back to gemini-2.5-flash-lite.
+    models_to_try = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"]
+    backoff_seconds = [20, 45, 90]
+    last_error = None
+
+    for model_idx, model_name in enumerate(models_to_try):
+        for attempt in range(len(backoff_seconds) + 1):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=config,
+                )
+                if model_idx > 0:
+                    print(f"  (succeeded on fallback model: {model_name})")
+                return _extract_json(response.text)
+            except Exception as e:
+                last_error = e
+                msg = str(e)
+                transient = any(
+                    token in msg
+                    for token in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "INTERNAL")
+                )
+                if not transient or attempt >= len(backoff_seconds):
+                    # Either non-transient, or we've exhausted backoffs for this model
+                    print(f"  Model {model_name} failed: {type(e).__name__}: {msg[:200]}")
+                    break
+                wait = backoff_seconds[attempt]
+                print(f"  Gemini transient error on {model_name} "
+                      f"(attempt {attempt + 1}/{len(backoff_seconds)}). "
+                      f"Retrying in {wait}s...")
+                time.sleep(wait)
+
+    # All models and retries exhausted
+    raise last_error
 
 
 def verify_drivers(drivers):
@@ -283,7 +317,8 @@ def fmt_pct(pct):
     return f"{sign}{abs(pct):.2f}%"
 
 
-def build_pdf(out_path, sgt_date_str, us_close_str, prices, drivers, catalysts, market_closures=None):
+def build_pdf(out_path, sgt_date_str, us_close_str, prices, drivers, catalysts,
+              market_closures=None, on_the_horizon=None):
     doc = SimpleDocTemplate(
         out_path, pagesize=A4,
         topMargin=1.6*cm, bottomMargin=1.6*cm,
@@ -458,6 +493,17 @@ def build_pdf(out_path, sgt_date_str, us_close_str, prices, drivers, catalysts, 
     ct.setStyle(TableStyle(cst))
     story.append(ct)
 
+    # On the horizon — strategic forward-looking prose paragraph
+    if on_the_horizon and on_the_horizon.strip():
+        story.append(Spacer(1, 16))
+        story.append(Paragraph("On the horizon", h2))
+        story.append(Paragraph("Bigger events expected over the coming weeks", muted))
+        horizon_style = ParagraphStyle(
+            "horizon", fontName="Helvetica", fontSize=9.5,
+            textColor=COL_TEXT, leading=14, spaceBefore=2, spaceAfter=2,
+        )
+        story.append(Paragraph(on_the_horizon.strip(), horizon_style))
+
     def footer(canvas, doc):
         canvas.saveState()
         canvas.setFont("Helvetica", 7.5)
@@ -560,6 +606,7 @@ def main():
         pdf_path, sgt_date_str, us_close_str, prices, drivers,
         brief_data["catalysts_ahead"],
         market_closures=brief_data.get("market_closures") or [],
+        on_the_horizon=brief_data.get("on_the_horizon") or "",
     )
 
     print(f"Emailing to {recipient}...")
