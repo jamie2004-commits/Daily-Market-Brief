@@ -2,15 +2,14 @@ name: Daily market brief
 
 on:
   schedule:
-    # 00:15 UTC Tue-Sat = 8:15am SGT Tue-Sat
-    # 15-min offset avoids GitHub Actions top-of-hour cron congestion
-    - cron: '15 0 * * 2-6'
+    # 00:15 UTC Mon-Sat = 8:15am SGT Mon-Sat
+    - cron: '15 0 * * 1-6'
   workflow_dispatch: {}
 
 jobs:
   brief:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -21,6 +20,7 @@ jobs:
       - name: Generate and email brief
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          MARKETAUX_API_KEY: ${{ secrets.MARKETAUX_API_KEY }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
