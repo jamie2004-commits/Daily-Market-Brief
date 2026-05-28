@@ -67,6 +67,13 @@ COL_BORDER = colors.HexColor("#cccccc")
 COL_BORDER_LIGHT = colors.HexColor("#ececec")
 COL_POS = colors.HexColor("#0f7a3a")
 COL_NEG = colors.HexColor("#b8243c")
+# Section-header accent palette
+COL_HEADER_BG = colors.HexColor("#1f2c4a")   # dark navy bar
+COL_HEADER_SUB = colors.HexColor("#9aa6b8")  # subtitle on navy
+COL_ACCENT = colors.HexColor("#a01d2e")      # rich red accent
+COL_CELL_BG = colors.HexColor("#fafbfc")     # light cell background
+COL_TODAY_BG = colors.HexColor("#fff8e1")    # today column tint (warm)
+COL_CLOSED_BG = colors.HexColor("#fdf2f4")   # closure-day column tint (faint red)
 
 
 # ---------- Prices ----------
@@ -404,8 +411,219 @@ def fmt_pct(pct):
     return f"{sign}{abs(pct):.2f}%"
 
 
+def _section_header(title, subtitle=None, total_width_cm=17.0):
+    """Navy bar with a red left-accent stripe and a white title.
+    The optional subtitle renders in muted grey, separated by a bullet."""
+    title_style = ParagraphStyle(
+        "sechdr_title", fontName="Helvetica-Bold", fontSize=11,
+        textColor=colors.white, leading=14,
+    )
+    if subtitle:
+        text = (f"{title}  "
+                f"<font color='#9aa6b8' size='9'>·  {subtitle}</font>")
+    else:
+        text = title
+    para = Paragraph(text, title_style)
+    accent_w = 0.18
+    tbl = Table(
+        [["", para]],
+        colWidths=[accent_w*cm, (total_width_cm - accent_w)*cm],
+    )
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (0, 0), COL_ACCENT),
+        ("BACKGROUND", (1, 0), (1, 0), COL_HEADER_BG),
+        ("LEFTPADDING", (0, 0), (0, 0), 0),
+        ("RIGHTPADDING", (0, 0), (0, 0), 0),
+        ("LEFTPADDING", (1, 0), (1, 0), 10),
+        ("RIGHTPADDING", (1, 0), (1, 0), 10),
+        ("TOPPADDING", (0, 0), (-1, 0), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 7),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]))
+    return tbl
+
+
+def _parse_event_date(s, sgt_date):
+    """Parse 'Tue, May 26' style strings into a date.
+    Year is inferred from sgt_date, with rollover for cross-year boundaries."""
+    if not s:
+        return None
+    s = s.strip().rstrip(",").strip()
+    formats_no_year = [
+        "%a, %b %d", "%a %b %d", "%A, %B %d", "%A %B %d",
+        "%a, %B %d", "%A, %b %d", "%b %d", "%B %d",
+    ]
+    for fmt in formats_no_year:
+        try:
+            parsed = datetime.strptime(s, fmt).date().replace(year=sgt_date.year)
+            # Resolve year-rollover when sgt_date is near Jan/Dec
+            if (parsed - sgt_date).days < -200:
+                parsed = parsed.replace(year=sgt_date.year + 1)
+            elif (parsed - sgt_date).days > 200:
+                parsed = parsed.replace(year=sgt_date.year - 1)
+            return parsed
+        except ValueError:
+            continue
+    formats_with_year = ["%a, %b %d, %Y", "%A, %B %d, %Y",
+                         "%b %d, %Y", "%B %d, %Y"]
+    for fmt in formats_with_year:
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _build_forward_calendar(sgt_date, catalysts, closures):
+    """5-column horizontal calendar combining catalysts and market closures.
+
+    Layout:
+      Row 0: day labels (Mon 25 May, Tue 26 May, ...) on dark navy bg, white text.
+      Row 1: per-day content cell — closures rendered in red bold at top,
+             events in normal text below. Empty days show '—'.
+
+    Returns (table, overflow_events, overflow_closures) where overflow lists
+    contain anything outside the visible Mon-Fri window."""
+    weekday = sgt_date.weekday()  # 0=Mon, 6=Sun
+    if weekday < 5:
+        week_start = sgt_date - timedelta(days=weekday)
+    else:
+        # Weekend SGT brief: pivot to next week's Monday
+        week_start = sgt_date + timedelta(days=(7 - weekday))
+    days = [week_start + timedelta(days=i) for i in range(5)]
+
+    day_content = {d: {"closures": [], "events": []} for d in days}
+    overflow_events = []
+    overflow_closures = []
+
+    for c in (closures or []):
+        d = _parse_event_date(c.get("date", ""), sgt_date)
+        markets = (c.get("markets") or "").strip()
+        reason = (c.get("reason") or "").strip()
+        if not (markets or reason):
+            continue
+        line = f"{markets} — {reason}" if (markets and reason) else (markets or reason)
+        if d in day_content:
+            day_content[d]["closures"].append(line)
+        else:
+            overflow_closures.append((d, line))
+
+    for c in (catalysts or []):
+        d = _parse_event_date(c.get("date", ""), sgt_date)
+        event = (c.get("event") or "").strip()
+        if not event:
+            continue
+        if d in day_content:
+            day_content[d]["events"].append(event)
+        else:
+            overflow_events.append((d, event))
+
+    # Cell paragraph styles
+    closure_style = ParagraphStyle(
+        "cal_closure", fontName="Helvetica-Bold", fontSize=7.5,
+        textColor=COL_ACCENT, leading=10, spaceAfter=2,
+    )
+    event_style = ParagraphStyle(
+        "cal_event", fontName="Helvetica", fontSize=8,
+        textColor=COL_TEXT, leading=10.5, spaceAfter=2,
+    )
+    empty_style = ParagraphStyle(
+        "cal_empty", fontName="Helvetica", fontSize=8,
+        textColor=colors.HexColor("#bbbbbb"), leading=10, alignment=1,
+    )
+    hdr_style = ParagraphStyle(
+        "cal_hdr", fontName="Helvetica-Bold", fontSize=8.5,
+        textColor=colors.white, leading=11,
+    )
+
+    # Header row — highlight today with a yellow accent
+    header_cells = []
+    today_idx = None
+    for i, d in enumerate(days):
+        if d == sgt_date:
+            today_idx = i
+            label = (f'<font color="#ffd166">{d.strftime("%a")}</font> '
+                     f'{d.strftime("%-d %b")}  '
+                     f'<font color="#ffd166" size="7">· TODAY</font>')
+        else:
+            label = (f'{d.strftime("%a")} '
+                     f'<font color="#c0c8d4">{d.strftime("%-d %b")}</font>')
+        header_cells.append(Paragraph(label, hdr_style))
+
+    # Content row — list of Paragraphs per cell (ReportLab handles vertical stack)
+    content_cells = []
+    for d in days:
+        parts = []
+        for cl in day_content[d]["closures"]:
+            parts.append(Paragraph(f"● {cl}", closure_style))
+        for ev in day_content[d]["events"]:
+            parts.append(Paragraph(ev, event_style))
+        if not parts:
+            parts.append(Paragraph("—", empty_style))
+        content_cells.append(parts)
+
+    data = [header_cells, content_cells]
+    col_w = 17.0 / 5.0
+    col_widths = [col_w*cm] * 5
+
+    style = [
+        ("BACKGROUND", (0, 0), (-1, 0), COL_HEADER_BG),
+        ("VALIGN", (0, 0), (-1, 0), "MIDDLE"),
+        ("VALIGN", (0, 1), (-1, 1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, 0), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
+        ("TOPPADDING", (0, 1), (-1, 1), 8),
+        ("BOTTOMPADDING", (0, 1), (-1, 1), 8),
+        ("LEFTPADDING", (0, 0), (-1, -1), 7),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+        ("BACKGROUND", (0, 1), (-1, 1), COL_CELL_BG),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#dddddd")),
+        ("LINEAFTER", (0, 0), (-2, 0), 0.5, colors.HexColor("#3a4868")),
+    ]
+    # Tint closure-day columns and the today column
+    for i, d in enumerate(days):
+        if day_content[d]["closures"]:
+            style.append(("BACKGROUND", (i, 1), (i, 1), COL_CLOSED_BG))
+    if today_idx is not None:
+        style.append(("BACKGROUND", (today_idx, 1), (today_idx, 1), COL_TODAY_BG))
+
+    tbl = Table(data, colWidths=col_widths, repeatRows=1)
+    tbl.setStyle(TableStyle(style))
+    return tbl, overflow_events, overflow_closures
+
+
+def _build_horizon_block(text):
+    """Render the on-the-horizon prose with a red left bar and light cell bg,
+    styled like the 'Developments to watch' sections in finance briefs."""
+    horizon_style = ParagraphStyle(
+        "horizon_body", fontName="Helvetica", fontSize=9.5,
+        textColor=COL_TEXT, leading=14,
+    )
+    para = Paragraph(text, horizon_style)
+    tbl = Table([["", para]], colWidths=[0.18*cm, 16.82*cm])
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (0, -1), COL_ACCENT),
+        ("BACKGROUND", (1, 0), (1, -1), COL_CELL_BG),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 10),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+        ("LEFTPADDING", (0, 0), (0, 0), 0),
+        ("RIGHTPADDING", (0, 0), (0, 0), 0),
+        ("LEFTPADDING", (1, 0), (1, 0), 12),
+        ("RIGHTPADDING", (1, 0), (1, 0), 12),
+    ]))
+    return tbl
+
+
 def build_pdf(out_path, sgt_date_str, us_close_str, prices, drivers, catalysts,
-              market_closures=None, on_the_horizon=None):
+              market_closures=None, on_the_horizon=None, sgt_date=None):
+    # Resolve sgt_date for the Forward calendar window. Prefer the explicit
+    # kwarg; otherwise parse sgt_date_str (format produced by main()).
+    if sgt_date is None:
+        try:
+            sgt_date = datetime.strptime(sgt_date_str, "%A, %B %d, %Y").date()
+        except ValueError:
+            sgt_date = datetime.now(ZoneInfo("Asia/Singapore")).date()
     doc = SimpleDocTemplate(
         out_path, pagesize=A4,
         topMargin=1.6*cm, bottomMargin=1.6*cm,
@@ -436,8 +654,9 @@ def build_pdf(out_path, sgt_date_str, us_close_str, prices, drivers, catalysts,
                             spaceBefore=4, spaceAfter=14))
 
     # Snapshot
-    story.append(Paragraph("Market snapshot", h2))
-    story.append(Spacer(1, 4))
+    story.append(_section_header("Market snapshot",
+                                 f"Closes as of {us_close_str}"))
+    story.append(Spacer(1, 8))
     data = [["Asset", "Close", "Day %"]]
     st = [
         ("FONT", (0,0), (-1,0), "Helvetica-Bold", 8.5),
@@ -461,62 +680,12 @@ def build_pdf(out_path, sgt_date_str, us_close_str, prices, drivers, catalysts,
     snap.setStyle(TableStyle(st))
     story.append(snap)
 
-    # Market holidays this week (grouped by date)
-    if market_closures:
-        story.append(Spacer(1, 14))
-        story.append(Paragraph("Market holidays this week", h3))
-        story.append(Spacer(1, 4))
-
-        # Group entries by date so date column merges naturally
-        from itertools import groupby
-        closures_grouped = []
-        for date_str, group in groupby(market_closures, key=lambda x: x.get("date", "")):
-            entries = []
-            for c in group:
-                markets = c.get("markets", "")
-                reason = c.get("reason", "")
-                if markets and reason:
-                    entries.append((markets, reason))
-            if entries:
-                closures_grouped.append((date_str, entries))
-
-        if closures_grouped:
-            cl_data = []
-            cl_spans = []
-            cl_last_row_of_day = []
-            row_idx = 0
-            for date_str, entries in closures_grouped:
-                start_row = row_idx
-                for j, (markets, reason) in enumerate(entries):
-                    cl_data.append([
-                        date_str if j == 0 else "",
-                        markets,
-                        reason,
-                    ])
-                    row_idx += 1
-                if len(entries) > 1:
-                    cl_spans.append(("SPAN", (0, start_row), (0, row_idx - 1)))
-                cl_last_row_of_day.append(row_idx - 1)
-
-            cl_table = Table(cl_data, colWidths=[3.2*cm, 5.5*cm, 7.8*cm])
-            cl_style = [
-                ("FONT", (0,0), (-1,-1), "Helvetica", 9),
-                ("TEXTCOLOR", (0,0), (0,-1), COL_MUTED),
-                ("TEXTCOLOR", (1,0), (1,-1), COL_TEXT),
-                ("TEXTCOLOR", (2,0), (2,-1), COL_MUTED),
-                ("VALIGN", (0,0), (-1,-1), "TOP"),
-                ("TOPPADDING", (0,0), (-1,-1), 5),
-                ("BOTTOMPADDING", (0,0), (-1,-1), 5),
-            ] + cl_spans
-            for end_row in cl_last_row_of_day[:-1]:
-                cl_style.append(("LINEBELOW", (0, end_row), (-1, end_row), 0.25, COL_BORDER_LIGHT))
-            cl_table.setStyle(TableStyle(cl_style))
-            story.append(cl_table)
     story.append(Spacer(1, 18))
 
     # Drivers
-    story.append(Paragraph("Top market drivers", h2))
-    story.append(Paragraph("What moved markets and which names felt it", muted))
+    story.append(_section_header("Top market drivers",
+                                 "What moved markets and which names felt it"))
+    story.append(Spacer(1, 8))
     for d in drivers:
         block = [Paragraph(d["headline"], h3), Paragraph(d["body"], body)]
         if d.get("impacted_tickers"):
@@ -556,55 +725,52 @@ def build_pdf(out_path, sgt_date_str, us_close_str, prices, drivers, catalysts,
         story.append(KeepTogether(block))
         story.append(Spacer(1, 12))
 
-    # Catalysts ahead
-    story.append(Spacer(1, 4))
-    story.append(Paragraph("Catalysts ahead", h2))
-    story.append(Paragraph("Next 3 days · Fed events, data releases, earnings", muted))
+    # Forward calendar — combined market closures + catalysts (Fed events,
+    # data releases, earnings) laid out as a horizontal week view.
+    story.append(Spacer(1, 8))
+    story.append(_section_header(
+        "Forward calendar",
+        "This week · holidays, Fed events, data releases & earnings",
+    ))
+    story.append(Spacer(1, 8))
 
-    # Group catalysts by day so the date appears once per group
-    from itertools import groupby
-    grouped = []
-    for date, group in groupby(catalysts, key=lambda x: x["date"]):
-        grouped.append((date, [g["event"] for g in group]))
+    cal_tbl, overflow_events, overflow_closures = _build_forward_calendar(
+        sgt_date, catalysts or [], market_closures or [],
+    )
+    story.append(cal_tbl)
 
-    cd = []
-    spans = []
-    last_row_of_day = []  # for separator lines between day groups
-    row_idx = 0
-    for date, events in grouped:
-        start_row = row_idx
-        for j, event in enumerate(events):
-            cd.append([date if j == 0 else "", event])
-            row_idx += 1
-        if len(events) > 1:
-            spans.append(("SPAN", (0, start_row), (0, row_idx - 1)))
-        last_row_of_day.append(row_idx - 1)
+    # If any items fall outside the visible Mon-Fri window, list them below
+    if overflow_events or overflow_closures:
+        more_lines = []
+        for d, line in overflow_closures:
+            ds = d.strftime("%a %-d %b") if d else "Date?"
+            more_lines.append(
+                f'<font color="#a01d2e"><b>●</b></font> <b>{ds}</b> · {line}'
+            )
+        for d, line in overflow_events:
+            ds = d.strftime("%a %-d %b") if d else "Date?"
+            more_lines.append(f'<b>{ds}</b> · {line}')
+        if more_lines:
+            extra_style = ParagraphStyle(
+                "extra_cal", fontName="Helvetica", fontSize=8.5,
+                textColor=COL_MUTED, leading=12,
+            )
+            story.append(Spacer(1, 6))
+            story.append(Paragraph(
+                "<b>Beyond this week:</b>  " + "  ·  ".join(more_lines),
+                extra_style,
+            ))
 
-    ct = Table(cd, colWidths=[3.5*cm, 13*cm])
-    cst = [
-        ("FONT", (0,0), (-1,-1), "Helvetica", 9.5),
-        ("TEXTCOLOR", (0,0), (0,-1), COL_MUTED),
-        ("TEXTCOLOR", (1,0), (1,-1), COL_TEXT),
-        ("VALIGN", (0,0), (-1,-1), "TOP"),
-        ("TOPPADDING", (0,0), (-1,-1), 6),
-        ("BOTTOMPADDING", (0,0), (-1,-1), 6),
-    ] + spans
-    # Add separator lines between day groups (not within a day's events)
-    for end_row in last_row_of_day[:-1]:
-        cst.append(("LINEBELOW", (0, end_row), (-1, end_row), 0.25, COL_BORDER_LIGHT))
-    ct.setStyle(TableStyle(cst))
-    story.append(ct)
-
-    # On the horizon — strategic forward-looking prose paragraph
+    # On the horizon — strategic forward-looking prose, styled with a red
+    # left bar and a light cell background for a richer visual treatment.
     if on_the_horizon and on_the_horizon.strip():
-        story.append(Spacer(1, 16))
-        story.append(Paragraph("On the horizon", h2))
-        story.append(Paragraph("Bigger events expected over the coming weeks", muted))
-        horizon_style = ParagraphStyle(
-            "horizon", fontName="Helvetica", fontSize=9.5,
-            textColor=COL_TEXT, leading=14, spaceBefore=2, spaceAfter=2,
-        )
-        story.append(Paragraph(on_the_horizon.strip(), horizon_style))
+        story.append(Spacer(1, 18))
+        story.append(_section_header(
+            "On the horizon",
+            "Bigger events expected over the coming weeks",
+        ))
+        story.append(Spacer(1, 8))
+        story.append(_build_horizon_block(on_the_horizon.strip()))
 
     def footer(canvas, doc):
         canvas.saveState()
@@ -720,6 +886,7 @@ def main():
         brief_data["catalysts_ahead"],
         market_closures=brief_data.get("market_closures") or [],
         on_the_horizon=brief_data.get("on_the_horizon") or "",
+        sgt_date=sgt_date,
     )
 
     print(f"Emailing to {recipient}...")
