@@ -253,17 +253,29 @@ Then output ONLY a JSON object (no markdown fences, no preamble, no commentary) 
     {{"date": "Mon, May 25", "markets": "Korea, Hong Kong", "reason": "Buddha's Birthday"}},
     {{"date": "Wed, May 27", "markets": "Singapore", "reason": "Hari Raya Haji"}}
   ],
-  "on_the_horizon": "A short prose paragraph (3-5 sentences) covering 2-4 MAJOR upcoming events that sit BEYOND the next 3 days but have significant market implications."
+  "developments_to_watch": [
+    {{
+      "headline": "Short punchy setup-style headline under 18 words. Use **double asterisks** to emphasize key prices/moves/levels (will render red).",
+      "body": "3-5 sentences explaining the setup, what's at stake, and what to watch. Specific, forward-looking, and tied to identifiable market mechanics. May also use **double asterisks** for key emphasis.",
+      "categories": ["RATES", "DURATION", "FED"],
+      "impacted_tickers": ["TICKER1", "TICKER2", "TICKER3"]
+    }}
+  ]
 }}
 
 Rules:
 - Exactly 3 drivers, ordered by market impact. Each driver MUST be tied to meaningful price action — typically a 1%+ move in major names, a notable sector move, or a clear inflection in a major index, yield, or commodity. A story being merely newsworthy is NOT enough; if markets didn't react, do not promote it to a driver. If you can't find three high-impact stories, choose the next-most-impactful even if smaller, but never include throwaway commentary or routine policy meetings with negligible market reaction. Prioritize stories from the most recent 24-48 hours when impact is comparable.
-- impacted_tickers: 3-5 real US-listed ticker symbols per driver. Standard symbols only (AAPL, NVDA, JPM, XLE, etc.). Never invent tickers.
+- For driver headlines AND bodies, you may use **double asterisks** sparingly to highlight the 1-3 most important numbers/moves/levels (e.g., "Brent **−7%**", "**30Y 5.20% breach**"). These render as bold red in the PDF. Use only for genuinely market-moving figures, not decorative emphasis.
+- impacted_tickers (drivers): 3-5 real US-listed ticker symbols per driver. Standard symbols only (AAPL, NVDA, JPM, XLE, etc.). Never invent tickers.
 - source_url and source_title: ALWAYS fill these from the curated Marketaux articles above whenever the driver is supported by one of them. If no curated article covers the story, leave both as empty strings (the PDF will fall back to a Google News search link). NEVER use a Vertex/grounding redirect URL — only real direct article URLs.
 - Make headlines specific enough that someone searching for them on Google News will find the actual articles you're referencing.
 - catalysts_ahead: items scheduled in the next 3 calendar days from today ({sgt_date_str}). Could be 1-6 items depending on what's on the calendar. Include FOMC / Fed meetings and speeches, US government and policy announcements, major economic data releases (CPI, PCE, GDP, NFP, jobless claims, retail sales, etc.), and major upcoming earnings (use real ticker symbols). Use real dates. Order chronologically.
 - market_closures: one entry per (date, holiday) pair. "markets" must be country names only (US, UK, Japan, Korea, Hong Kong, Singapore, China, Eurozone, Australia) — NEVER ticker symbols or index names. Group multiple countries observing the same holiday on the same date into one entry. Cover the FULL week {week_mon_str} to {week_fri_str}: include past closures already in the stale list AND any upcoming closures you find via search. Order chronologically. If no closures, return [].
-- on_the_horizon: a prose paragraph (3-5 sentences, no bullet points, no headers) summarizing 2-4 MAJOR strategic events expected beyond the next 3 days but within roughly the next 2 months. These are forward-looking developments distinct from the daily-calendar catalysts above. Examples of what belongs here: rumored or scheduled IPOs (e.g., SpaceX, Stripe, Klarna), big-deal M&A milestones, antitrust rulings, major product launches (Apple events, Nvidia GTC, etc.), election milestones, central bank decisions further out, OPEC meetings, big sector inflection points. Use Google Search to identify what's actually upcoming. Be specific with names and approximate dates. If genuinely nothing notable is coming up, return a single short sentence acknowledging that — but this should be rare.
+- developments_to_watch: exactly 3 setup-style items describing what to watch into upcoming sessions (next session through ~1-2 weeks out). These are forward-looking SETUPS — positioning, levels, breach watches, event setups — distinct from completed drivers above and from daily-calendar catalysts. Each item should describe an identifiable market mechanic: a curve setup into a key data print, a positioning unwind into a holiday, a binary level being tested, an event lineup that compresses risk, a rumored or scheduled corporate event (IPO, M&A, antitrust ruling, major product launch, central bank meeting beyond next 3 days, OPEC, etc.). Order by importance.
+  - headline: under 18 words, specific. Use **markdown** for 1-2 key emphases.
+  - body: 3-5 sentences, forward-looking, mechanics-focused. Use **markdown** for key numbers/levels.
+  - categories: 2-4 short uppercase tags separated as array. Pick from common buckets like: RATES, DURATION, FED, FOMC, INFLATION, MACRO, GROWTH, GDP, CPI, PCE, EARNINGS, AI, TECH, SEMIS, HBM, MEGACAP, CONSUMER, ENERGY, OIL, COMMODITIES, GOLD, M&A, IPO, ANTITRUST, REGULATION, ASIA, EM, CHINA, JAPAN, KOREA, INDIA, HOLIDAY, GEOPOLITICS, ELECTION, TARIFFS, TRADE, USD, FX, JPY, VOLATILITY, RISK, BREACH, POSITIONING. You may invent additional short tags if needed.
+  - impacted_tickers: 3-6 real ticker symbols relevant to the setup. May include US and international symbols (e.g., 005930.KS, 2330.TW). Standard symbols only; never invent.
 - Output ONLY the JSON object. Nothing before or after."""
 
 
@@ -386,12 +398,21 @@ def synthesize(prices, gemini_key, us_close_str, sgt_date_str,
 
 
 def verify_drivers(drivers):
+    """Verify impacted_tickers against yfinance. Accepts items where
+    impacted_tickers is a list of strings (raw from Gemini) or already-verified
+    dicts (idempotent). Returns drivers with dicts of {symbol, pct}."""
     for d in drivers:
         verified = []
         for sym in d.get("impacted_tickers", []):
-            pct = get_ticker_pct(sym)
+            if isinstance(sym, dict) and "symbol" in sym and "pct" in sym:
+                verified.append(sym)  # already verified; pass through
+                continue
+            symbol = sym.get("symbol") if isinstance(sym, dict) else sym
+            if not symbol:
+                continue
+            pct = get_ticker_pct(symbol)
             if pct is not None:
-                verified.append({"symbol": sym, "pct": pct})
+                verified.append({"symbol": symbol, "pct": pct})
         d["impacted_tickers"] = verified
     return drivers
 
@@ -592,18 +613,105 @@ def _build_forward_calendar(sgt_date, catalysts, closures):
     return tbl, overflow_events, overflow_closures
 
 
-def _build_horizon_block(text):
-    """Render the on-the-horizon prose with a red left bar and light cell bg,
-    styled like the 'Developments to watch' sections in finance briefs."""
-    horizon_style = ParagraphStyle(
-        "horizon_body", fontName="Helvetica", fontSize=9.5,
+def _highlight_emphasis(text, color="#a01d2e"):
+    """Convert **markdown** emphasis to bold red HTML for ReportLab Paragraphs.
+    Safe no-op when no asterisks are present."""
+    if not text:
+        return text
+    return re.sub(
+        r"\*\*([^*]+?)\*\*",
+        rf'<font color="{color}"><b>\1</b></font>',
+        text,
+    )
+
+
+def _build_development_item(num, dev):
+    """Render one 'developments to watch' item with red left bar, a numbered
+    headline, category tags right-aligned at top, body, and impacted tickers
+    at the bottom. Visual style mirrors the 'Developments to Watch' sections
+    in finance briefs."""
+    headline_style = ParagraphStyle(
+        "dev_headline", fontName="Helvetica-Bold", fontSize=10.5,
         textColor=COL_TEXT, leading=14,
     )
-    para = Paragraph(text, horizon_style)
-    tbl = Table([["", para]], colWidths=[0.18*cm, 16.82*cm])
-    tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (0, -1), COL_ACCENT),
-        ("BACKGROUND", (1, 0), (1, -1), COL_CELL_BG),
+    cat_style = ParagraphStyle(
+        "dev_cat", fontName="Helvetica-Bold", fontSize=8.5,
+        textColor=COL_ACCENT, leading=13, alignment=2,  # right-aligned
+    )
+    body_style = ParagraphStyle(
+        "dev_body", fontName="Helvetica", fontSize=9.5,
+        textColor=COL_TEXT, leading=14,
+    )
+    imp_style = ParagraphStyle(
+        "dev_imp", fontName="Helvetica", fontSize=9,
+        textColor=COL_TEXT, leading=12,
+    )
+
+    headline_html = _highlight_emphasis(
+        f'<b>{num}.</b>&nbsp;&nbsp;{dev.get("headline", "")}'
+    )
+    body_html = _highlight_emphasis(dev.get("body", ""))
+
+    headline_para = Paragraph(headline_html, headline_style)
+
+    cats = dev.get("categories") or []
+    if cats:
+        cat_text = "  ·  ".join(str(c).strip().upper() for c in cats if str(c).strip())
+        cat_para = Paragraph(cat_text, cat_style)
+    else:
+        cat_para = Paragraph("", cat_style)
+
+    # Title row: headline on the left, categories right-aligned on the right
+    title_row = Table(
+        [[headline_para, cat_para]],
+        colWidths=[10.8*cm, 4.7*cm],
+    )
+    title_row.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+    ]))
+
+    body_para = Paragraph(body_html, body_style)
+
+    # Impacted tickers — verified percentages render colored
+    impacted_para = None
+    tickers = dev.get("impacted_tickers") or []
+    if tickers:
+        parts = []
+        for t in tickers:
+            if isinstance(t, dict) and "pct" in t and "symbol" in t:
+                hx = "#0f7a3a" if t["pct"] >= 0 else "#b8243c"
+                sign = "+" if t["pct"] >= 0 else "−"
+                parts.append(
+                    f'<b>{t["symbol"]}</b> '
+                    f'<font color="{hx}"><b>{sign}{abs(t["pct"]):.2f}%</b></font>'
+                )
+            else:
+                sym = t.get("symbol", "") if isinstance(t, dict) else str(t)
+                if sym:
+                    parts.append(f"<b>{sym}</b>")
+        if parts:
+            impacted_html = (
+                '<font color="#a01d2e"><b>Impacted tickers:</b></font>&nbsp;&nbsp;'
+                + "  ·  ".join(parts)
+            )
+            impacted_para = Paragraph(impacted_html, imp_style)
+
+    cell_contents = [title_row, Spacer(1, 4), body_para]
+    if impacted_para is not None:
+        cell_contents.append(Spacer(1, 6))
+        cell_contents.append(impacted_para)
+
+    outer = Table(
+        [["", cell_contents]],
+        colWidths=[0.18*cm, 16.82*cm],
+    )
+    outer.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (0, 0), COL_ACCENT),
+        ("BACKGROUND", (1, 0), (1, 0), COL_CELL_BG),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("TOPPADDING", (0, 0), (-1, -1), 10),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
@@ -612,11 +720,11 @@ def _build_horizon_block(text):
         ("LEFTPADDING", (1, 0), (1, 0), 12),
         ("RIGHTPADDING", (1, 0), (1, 0), 12),
     ]))
-    return tbl
+    return outer
 
 
 def build_pdf(out_path, sgt_date_str, us_close_str, prices, drivers, catalysts,
-              market_closures=None, on_the_horizon=None, sgt_date=None):
+              market_closures=None, developments_to_watch=None, sgt_date=None):
     # Resolve sgt_date for the Forward calendar window. Prefer the explicit
     # kwarg; otherwise parse sgt_date_str (format produced by main()).
     if sgt_date is None:
@@ -686,8 +794,12 @@ def build_pdf(out_path, sgt_date_str, us_close_str, prices, drivers, catalysts,
     story.append(_section_header("Top market drivers",
                                  "What moved markets and which names felt it"))
     story.append(Spacer(1, 8))
-    for d in drivers:
-        block = [Paragraph(d["headline"], h3), Paragraph(d["body"], body)]
+    for i, d in enumerate(drivers, start=1):
+        headline_html = _highlight_emphasis(
+            f'<b>{i}.</b>&nbsp;&nbsp;{d.get("headline", "")}'
+        )
+        body_html = _highlight_emphasis(d.get("body", ""))
+        block = [Paragraph(headline_html, h3), Paragraph(body_html, body)]
         if d.get("impacted_tickers"):
             parts = []
             for t in d["impacted_tickers"]:
@@ -715,7 +827,10 @@ def build_pdf(out_path, sgt_date_str, us_close_str, prices, drivers, catalysts,
                 f'<a href="{source_url}"><font color="#1a5fb4"><u>{label}</u></font></a>'
             )
         else:
-            q = urllib.parse.quote_plus(d["headline"])
+            # Strip **markdown** so the search query is clean
+            clean_headline = re.sub(r"\*\*([^*]+?)\*\*", r"\1",
+                                    d.get("headline", ""))
+            q = urllib.parse.quote_plus(clean_headline)
             news_url = f"https://news.google.com/search?q={q}"
             link_html = (
                 f'<a href="{news_url}"><font color="#1a5fb4">'
@@ -732,7 +847,16 @@ def build_pdf(out_path, sgt_date_str, us_close_str, prices, drivers, catalysts,
         "Forward calendar",
         "This week · holidays, Fed events, data releases & earnings",
     ))
-    story.append(Spacer(1, 8))
+    # Small legend right under the header bar so the red bullets are unambiguous.
+    legend_style = ParagraphStyle(
+        "cal_legend", fontName="Helvetica", fontSize=8,
+        textColor=COL_MUTED, leading=10, alignment=2,  # right-aligned
+        spaceBefore=4, spaceAfter=4,
+    )
+    story.append(Paragraph(
+        '<font color="#a01d2e"><b>●</b></font>&nbsp;&nbsp;indicates market closure',
+        legend_style,
+    ))
 
     cal_tbl, overflow_events, overflow_closures = _build_forward_calendar(
         sgt_date, catalysts or [], market_closures or [],
@@ -761,16 +885,22 @@ def build_pdf(out_path, sgt_date_str, us_close_str, prices, drivers, catalysts,
                 extra_style,
             ))
 
-    # On the horizon — strategic forward-looking prose, styled with a red
-    # left bar and a light cell background for a richer visual treatment.
-    if on_the_horizon and on_the_horizon.strip():
+    # Developments to watch into the next session — forward-looking setup
+    # items styled with a red left bar, numbered continuing from drivers
+    # (so the brief reads as one continuous 1-6 narrative).
+    if developments_to_watch:
         story.append(Spacer(1, 18))
         story.append(_section_header(
-            "On the horizon",
-            "Bigger events expected over the coming weeks",
+            "Developments to watch into the next session",
+            "Setups, positioning & event lineups over the coming sessions",
         ))
         story.append(Spacer(1, 8))
-        story.append(_build_horizon_block(on_the_horizon.strip()))
+        # Items numbered starting at len(drivers) + 1 so drivers (1-3) and
+        # developments (4-6) form a continuous list.
+        start_num = (len(drivers) if drivers else 3) + 1
+        for offset, dev in enumerate(developments_to_watch):
+            story.append(_build_development_item(start_num + offset, dev))
+            story.append(Spacer(1, 10))
 
     def footer(canvas, doc):
         canvas.saveState()
@@ -878,6 +1008,8 @@ def main():
 
     print("Verifying impacted tickers against yfinance...")
     drivers = verify_drivers(brief_data["drivers"])
+    # Reuse verify_drivers on developments_to_watch — same impacted_tickers shape
+    developments = verify_drivers(brief_data.get("developments_to_watch") or [])
 
     print("Building PDF...")
     pdf_path = f"/tmp/market-brief-{sgt_date.isoformat()}.pdf"
@@ -885,7 +1017,7 @@ def main():
         pdf_path, sgt_date_str, us_close_str, prices, drivers,
         brief_data["catalysts_ahead"],
         market_closures=brief_data.get("market_closures") or [],
-        on_the_horizon=brief_data.get("on_the_horizon") or "",
+        developments_to_watch=developments,
         sgt_date=sgt_date,
     )
 
