@@ -25,6 +25,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import yfinance as yf
+import requests
 from google import genai
 from google.genai import types
 from reportlab.lib import colors
@@ -117,6 +118,63 @@ def get_ticker_pct(symbol):
         return None
 
 
+# ---------- News fetching (Marketaux) ----------
+
+def fetch_marketaux_news(api_token, total=15):
+    """Fetch financial news articles from Marketaux's free tier.
+    Returns up to `total` deduplicated articles across a few targeted queries."""
+    if not api_token:
+        return []
+
+    base = "https://api.marketaux.com/v1/news/all"
+    # Each query returns up to 3 articles on the free tier
+    queries = [
+        {"countries": "us", "limit": 3},
+        {"countries": "us", "search": "stocks earnings", "limit": 3},
+        {"search": "Federal Reserve interest rates inflation", "limit": 3},
+        {"search": "oil crude commodities", "limit": 3},
+        {"search": "Asia markets Nikkei Hang Seng KOSPI", "limit": 3},
+    ]
+
+    articles = []
+    seen = set()
+
+    for q in queries:
+        if len(articles) >= total:
+            break
+        params = {
+            "api_token": api_token,
+            "language": "en",
+            "filter_entities": "true",
+            **q,
+        }
+        try:
+            r = requests.get(base, params=params, timeout=15)
+            r.raise_for_status()
+            data = r.json()
+            for art in data.get("data", []):
+                url = art.get("url", "")
+                if not url or url in seen:
+                    continue
+                seen.add(url)
+                articles.append({
+                    "title": art.get("title", ""),
+                    "snippet": (art.get("snippet") or art.get("description") or "")[:400],
+                    "url": url,
+                    "source": art.get("source", ""),
+                    "published_at": art.get("published_at", ""),
+                    "entities": [
+                        e.get("symbol", "")
+                        for e in art.get("entities", [])
+                        if e.get("symbol")
+                    ][:5],
+                })
+        except Exception as e:
+            print(f"  Marketaux query failed ({q}): {type(e).__name__}: {e}")
+
+    return articles
+
+
 # ---------- Stale market detection ----------
 
 def _expected_gap_days(today_sgt):
@@ -162,9 +220,11 @@ Latest close per asset (from Yahoo Finance):
 
 {stale_block}
 
+{articles_block}
+
 In addition to the past closures already evident from the stale data above, use Google Search to find any OTHER full-day equity market closures occurring during this week ({week_mon_str} to {week_fri_str}, Monday through Friday inclusive). Check the official holiday calendars for major exchanges in: United States (NYSE/Nasdaq), United Kingdom (LSE), Eurozone (Xetra/Euronext), Japan (TSE), Korea (KRX), Hong Kong (HKEX), China (SSE/SZSE), Singapore (SGX), Australia (ASX). Include both PAST closures (already happened this week) AND UPCOMING closures (later this week).
 
-Use Google Search to find the day's top market-moving news. Cover both the US trading session of {us_close_str} AND any market-relevant news that happened between that close and {sgt_date_str} — including weekends, holidays, after-hours moves, and any major Asian session developments since.
+For your three drivers, primarily use the curated Marketaux articles above (they are real, dated, and have direct URLs). Supplement with Google Search if a clearly bigger market-moving story isn't covered by the curated set. Either way, find the day's top market-moving news.
 
 Then output ONLY a JSON object (no markdown fences, no preamble, no commentary) with this exact structure:
 
@@ -173,7 +233,9 @@ Then output ONLY a JSON object (no markdown fences, no preamble, no commentary) 
     {{
       "headline": "Short punchy headline under 12 words",
       "body": "4-6 sentences explaining what happened, why it mattered, and how the market reacted. Specific and factual.",
-      "impacted_tickers": ["TICKER1", "TICKER2", "TICKER3", "TICKER4"]
+      "impacted_tickers": ["TICKER1", "TICKER2", "TICKER3", "TICKER4"],
+      "source_url": "https://reuters.com/article-xyz (or empty string if no direct URL)",
+      "source_title": "Original article title or empty string"
     }}
   ],
   "catalysts_ahead": [
@@ -190,6 +252,7 @@ Then output ONLY a JSON object (no markdown fences, no preamble, no commentary) 
 Rules:
 - Exactly 3 drivers, ordered by market impact. Each driver MUST be tied to meaningful price action — typically a 1%+ move in major names, a notable sector move, or a clear inflection in a major index, yield, or commodity. A story being merely newsworthy is NOT enough; if markets didn't react, do not promote it to a driver. If you can't find three high-impact stories, choose the next-most-impactful even if smaller, but never include throwaway commentary or routine policy meetings with negligible market reaction. Prioritize stories from the most recent 24-48 hours when impact is comparable.
 - impacted_tickers: 3-5 real US-listed ticker symbols per driver. Standard symbols only (AAPL, NVDA, JPM, XLE, etc.). Never invent tickers.
+- source_url and source_title: ALWAYS fill these from the curated Marketaux articles above whenever the driver is supported by one of them. If no curated article covers the story, leave both as empty strings (the PDF will fall back to a Google News search link). NEVER use a Vertex/grounding redirect URL — only real direct article URLs.
 - Make headlines specific enough that someone searching for them on Google News will find the actual articles you're referencing.
 - catalysts_ahead: items scheduled in the next 3 calendar days from today ({sgt_date_str}). Could be 1-6 items depending on what's on the calendar. Include FOMC / Fed meetings and speeches, US government and policy announcements, major economic data releases (CPI, PCE, GDP, NFP, jobless claims, retail sales, etc.), and major upcoming earnings (use real ticker symbols). Use real dates. Order chronologically.
 - market_closures: one entry per (date, holiday) pair. "markets" must be country names only (US, UK, Japan, Korea, Hong Kong, Singapore, China, Eurozone, Australia) — NEVER ticker symbols or index names. Group multiple countries observing the same holiday on the same date into one entry. Cover the FULL week {week_mon_str} to {week_fri_str}: include past closures already in the stale list AND any upcoming closures you find via search. Order chronologically. If no closures, return [].
@@ -214,7 +277,7 @@ def _extract_json(text):
 
 
 def synthesize(prices, gemini_key, us_close_str, sgt_date_str,
-               stale_markets, week_mon_str, week_fri_str):
+               stale_markets, week_mon_str, week_fri_str, marketaux_articles):
     client = genai.Client(api_key=gemini_key)
     prices_block = "\n".join(
         f"- {p['display']}: {p['close']:.2f} ({p['pct']:+.2f}%) — latest close {p['date'].strftime('%a %b %d')}"
@@ -239,6 +302,29 @@ def synthesize(prices, gemini_key, us_close_str, sgt_date_str,
             "normal trading; no past closures detected from data."
         )
 
+    if marketaux_articles:
+        articles_lines = []
+        for i, a in enumerate(marketaux_articles, start=1):
+            tickers = ", ".join(a["entities"]) if a["entities"] else "—"
+            articles_lines.append(
+                f"[{i}] ({a['source']}, {a['published_at']}) {a['title']}\n"
+                f"    Tickers: {tickers}\n"
+                f"    Snippet: {a['snippet']}\n"
+                f"    URL: {a['url']}"
+            )
+        articles_block = (
+            "Curated financial news articles (from Marketaux) — these are real, "
+            "published articles you may use as primary sources for your drivers. "
+            "Prefer these over generic web search hits when the same story is "
+            "covered. For each driver you build from one of these articles, "
+            "include the article's URL in `source_url` and title in `source_title`:\n\n"
+            + "\n\n".join(articles_lines)
+        )
+    else:
+        articles_block = (
+            "No curated articles provided. Use Google Search to find market-moving news."
+        )
+
     prompt = PROMPT_TEMPLATE.format(
         us_close_str=us_close_str,
         sgt_date_str=sgt_date_str,
@@ -246,6 +332,7 @@ def synthesize(prices, gemini_key, us_close_str, sgt_date_str,
         stale_block=stale_block,
         week_mon_str=week_mon_str,
         week_fri_str=week_fri_str,
+        articles_block=articles_block,
     )
     grounding_tool = types.Tool(google_search=types.GoogleSearch())
     config = types.GenerateContentConfig(
@@ -444,13 +531,28 @@ def build_pdf(out_path, sgt_date_str, us_close_str, prices, drivers, catalysts,
             block.append(Spacer(1, 4))
             block.append(Paragraph(
                 f'<i>Impacted:</i>&nbsp;&nbsp;{"  ·  ".join(parts)}', body))
-        # Generate a Google News search link based on the headline
-        # This avoids broken grounding-redirect URLs from Gemini
-        q = urllib.parse.quote_plus(d["headline"])
-        news_url = f"https://news.google.com/search?q={q}"
-        block.append(Paragraph(
-            f'<a href="{news_url}"><font color="#1a5fb4"><u>Find articles on Google News &rarr;</u></font></a>',
-            src))
+        # Prefer a real article URL from Marketaux when Gemini attached one;
+        # fall back to a Google News search link otherwise.
+        source_url = (d.get("source_url") or "").strip()
+        source_title = (d.get("source_title") or "").strip()
+        is_real_url = (
+            source_url.startswith("http")
+            and "grounding-api-redirect" not in source_url
+            and "vertexaisearch.cloud.google.com" not in source_url
+        )
+        if is_real_url:
+            label = source_title if source_title else "Read the full article"
+            link_html = (
+                f'<a href="{source_url}"><font color="#1a5fb4"><u>{label}</u></font></a>'
+            )
+        else:
+            q = urllib.parse.quote_plus(d["headline"])
+            news_url = f"https://news.google.com/search?q={q}"
+            link_html = (
+                f'<a href="{news_url}"><font color="#1a5fb4">'
+                f'<u>Find articles on Google News &rarr;</u></font></a>'
+            )
+        block.append(Paragraph(link_html, src))
         story.append(KeepTogether(block))
         story.append(Spacer(1, 12))
 
@@ -553,6 +655,9 @@ def main():
         print(f"FATAL: missing required env var: {e}")
         sys.exit(1)
 
+    # Optional: Marketaux for curated article URLs
+    marketaux_key = os.environ.get("MARKETAUX_API_KEY", "").strip()
+
     # SGT date = the day the user reads the brief (cron runs 8am SGT)
     sgt_now = datetime.now(ZoneInfo("Asia/Singapore"))
     sgt_date = sgt_now.date()
@@ -591,10 +696,18 @@ def main():
     week_fri_str = week_fri.strftime("%a, %b %d")
     print(f"  Week scope for closure detection: {week_mon_str} – {week_fri_str}")
 
+    if marketaux_key:
+        print("Fetching news from Marketaux...")
+        marketaux_articles = fetch_marketaux_news(marketaux_key, total=15)
+        print(f"  Got {len(marketaux_articles)} articles")
+    else:
+        print("MARKETAUX_API_KEY not set; using Google Search only.")
+        marketaux_articles = []
+
     print("Calling Gemini (synthesis + Google Search grounding)...")
     brief_data = synthesize(
         prices, gemini_key, us_close_str, sgt_date_str,
-        stale_markets, week_mon_str, week_fri_str,
+        stale_markets, week_mon_str, week_fri_str, marketaux_articles,
     )
 
     print("Verifying impacted tickers against yfinance...")
