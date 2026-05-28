@@ -17,6 +17,13 @@ jobs:
           python-version: '3.12'
           cache: pip
       - run: pip install -r requirements.txt
+      # Embedded CJK font for the Simplified/Traditional Chinese editions.
+      # WenQuanYi Zen Hei has TrueType outlines, which ReportLab can embed
+      # (Noto Sans CJK uses PostScript outlines and will NOT work).
+      - name: Install CJK font
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fonts-wqy-zenhei
       - name: Generate and email brief
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
