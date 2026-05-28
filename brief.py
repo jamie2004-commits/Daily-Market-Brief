@@ -32,6 +32,9 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import cm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.pdfmetrics import registerFontFamily
+from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
     HRFlowable, KeepTogether, Paragraph, SimpleDocTemplate,
     Spacer, Table, TableStyle,
@@ -74,6 +77,218 @@ COL_ACCENT = colors.HexColor("#a01d2e")      # rich red accent
 COL_CELL_BG = colors.HexColor("#fafbfc")     # light cell background
 COL_TODAY_BG = colors.HexColor("#fff8e1")    # today column tint (warm)
 COL_CLOSED_BG = colors.HexColor("#fdf2f4")   # closure-day column tint (faint red)
+
+
+# ---------- Localization ----------
+# We render three editions per run: English, Simplified Chinese, Traditional
+# Chinese. Each gets its own PDF. Chinese editions use an embedded TrueType CJK
+# font (WenQuanYi Zen Hei) so glyphs render in any PDF viewer (Gmail, mobile).
+
+LANGS = ["en", "sc", "tc"]
+
+# Candidate paths for a TrueType (glyf-outline) CJK font. ReportLab cannot use
+# Noto Sans CJK (PostScript/CFF outlines), so we rely on WenQuanYi Zen Hei,
+# installed via the workflow (apt: fonts-wqy-zenhei).
+_CJK_FONT_PATHS = [
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/wenquanyi/wqy-zenhei/wqy-zenhei.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    "/usr/share/fonts/wqy-zenhei/wqy-zenhei.ttc",
+]
+_CJK_FONT_NAME = "CJK"
+_cjk_state = {"checked": False, "available": False}
+
+
+def _ensure_cjk_font():
+    """Register the embedded CJK font once. Returns True if available.
+    Bold/italic are aliased to the same face so <b>/<i> on Chinese text don't
+    fall back to Helvetica (which would render Chinese as blank boxes)."""
+    if _cjk_state["checked"]:
+        return _cjk_state["available"]
+    _cjk_state["checked"] = True
+    path = next((p for p in _CJK_FONT_PATHS if os.path.exists(p)), None)
+    if not path:
+        print("  WARN: no CJK font found on system; Chinese editions will be "
+              "skipped. Ensure the workflow installs fonts-wqy-zenhei.")
+        _cjk_state["available"] = False
+        return False
+    try:
+        pdfmetrics.registerFont(TTFont(_CJK_FONT_NAME, path, subfontIndex=0))
+        registerFontFamily(
+            _CJK_FONT_NAME, normal=_CJK_FONT_NAME, bold=_CJK_FONT_NAME,
+            italic=_CJK_FONT_NAME, boldItalic=_CJK_FONT_NAME,
+        )
+        _cjk_state["available"] = True
+        print(f"  CJK font registered from {path}")
+    except Exception as e:
+        print(f"  WARN: failed to register CJK font ({type(e).__name__}: {e}); "
+              "Chinese editions will be skipped.")
+        _cjk_state["available"] = False
+    return _cjk_state["available"]
+
+
+def _prose_font(lang):
+    """Font for prose / Chinese text. English uses Helvetica; CJK uses the
+    embedded font when available, else Helvetica (latin fallback)."""
+    if lang in ("sc", "tc") and _cjk_state.get("available"):
+        return _CJK_FONT_NAME
+    return "Helvetica"
+
+
+def _prose_font_bold(lang):
+    # CJK has no separate bold; reuse the same face. English keeps Helvetica-Bold.
+    if lang in ("sc", "tc") and _cjk_state.get("available"):
+        return _CJK_FONT_NAME
+    return "Helvetica-Bold"
+
+
+def _sanitize_cjk(text, lang):
+    """The CJK font lacks U+2212 (typographic minus). Swap it for an ASCII
+    hyphen-minus in Chinese editions so negative figures don't vanish."""
+    if lang in ("sc", "tc") and text:
+        return text.replace("\u2212", "-")
+    return text
+
+
+# Per-language UI strings (everything that isn't model-generated content).
+LABELS = {
+    "en": {
+        "eyebrow": "DAILY MARKET BRIEF",
+        "snapshot": "Market snapshot",
+        "snapshot_sub": "Closes as of {date}",
+        "drivers": "Top market drivers",
+        "drivers_sub": "What moved markets and which names felt it",
+        "calendar": "Forward calendar",
+        "calendar_sub": "This week · holidays, Fed events, data releases & earnings",
+        "legend": "indicates market closure",
+        "today": "TODAY",
+        "beyond": "Beyond this week:",
+        "impacted": "Impacted:",
+        "read_article": "Read the full article",
+        "find_news": "Find articles on Google News \u2192",
+        "developments": "Developments to watch into the next session",
+        "developments_sub": "Notable scheduled events beyond the forward calendar",
+        "col_asset": "Asset", "col_close": "Close", "col_pct": "Day %",
+        "footer": "Generated automatically · prices from Yahoo Finance · news via Gemini + Google Search",
+        "page": "Page {n}",
+        "email_body": ("Your daily market brief for {date} is attached in three "
+                       "editions: English, Simplified Chinese, and Traditional "
+                       "Chinese.\n\nSent automatically by your market-brief GitHub Action."),
+    },
+    "sc": {
+        "eyebrow": "每日市场简报",
+        "snapshot": "市场快照",
+        "snapshot_sub": "截至 {date} 收盘",
+        "drivers": "市场主要驱动因素",
+        "drivers_sub": "推动市场的事件及受影响标的",
+        "calendar": "前瞻日历",
+        "calendar_sub": "本周 · 假期、美联储事件、数据发布与财报",
+        "legend": "表示休市",
+        "today": "今日",
+        "beyond": "本周以外：",
+        "impacted": "受影响标的：",
+        "read_article": "阅读全文",
+        "find_news": "在 Google 新闻查找相关报道 \u2192",
+        "developments": "下一交易时段值得关注的进展",
+        "developments_sub": "前瞻日历之外的重要既定事件",
+        "col_asset": "资产", "col_close": "收盘", "col_pct": "当日 %",
+        "footer": "自动生成 · 价格来自 Yahoo Finance · 新闻经由 Gemini + Google 搜索",
+        "page": "第 {n} 页",
+        "email_body": ("您 {date} 的每日市场简报已附上，共三个版本："
+                       "英文、简体中文、繁体中文。\n\n由您的 market-brief GitHub Action 自动发送。"),
+    },
+    "tc": {
+        "eyebrow": "每日市場簡報",
+        "snapshot": "市場快照",
+        "snapshot_sub": "截至 {date} 收盤",
+        "drivers": "市場主要驅動因素",
+        "drivers_sub": "推動市場的事件及受影響標的",
+        "calendar": "前瞻日曆",
+        "calendar_sub": "本週 · 假期、聯準會事件、數據發布與財報",
+        "legend": "表示休市",
+        "today": "今日",
+        "beyond": "本週以外：",
+        "impacted": "受影響標的：",
+        "read_article": "閱讀全文",
+        "find_news": "在 Google 新聞查找相關報導 \u2192",
+        "developments": "下一交易時段值得關注的發展",
+        "developments_sub": "前瞻日曆之外的重要既定事件",
+        "col_asset": "資產", "col_close": "收盤", "col_pct": "當日 %",
+        "footer": "自動生成 · 價格來自 Yahoo Finance · 新聞經由 Gemini + Google 搜尋",
+        "page": "第 {n} 頁",
+        "email_body": ("您 {date} 的每日市場簡報已附上，共三個版本："
+                       "英文、簡體中文、繁體中文。\n\n由您的 market-brief GitHub Action 自動發送。"),
+    },
+}
+
+# Snapshot asset display names per language. Follows the SC/TC variant rules
+# (e.g. KOSPI = 韩综 / 韓綜). Tickers like VIX stay in Latin.
+DISPLAY_NAMES = {
+    "en": {s: d for s, d, _ in TICKERS},
+    "sc": {
+        "^GSPC": "标普500", "^IXIC": "纳斯达克", "^DJI": "道琼斯",
+        "^RUT": "罗素2000", "^N225": "日经225", "^KS11": "韩综",
+        "^HSI": "恒生", "^STI": "海峡时报", "^VIX": "VIX",
+        "^TNX": "美国10年期国债收益率", "DX-Y.NYB": "美元指数 (DXY)",
+        "GC=F": "黄金", "CL=F": "WTI原油",
+    },
+    "tc": {
+        "^GSPC": "標普500", "^IXIC": "納斯達克", "^DJI": "道瓊斯",
+        "^RUT": "羅素2000", "^N225": "日經225", "^KS11": "韓綜",
+        "^HSI": "恒生", "^STI": "海峽時報", "^VIX": "VIX",
+        "^TNX": "美國10年期公債殖利率", "DX-Y.NYB": "美元指數 (DXY)",
+        "GC=F": "黃金", "CL=F": "WTI原油",
+    },
+}
+
+# Weekday names for calendar day-column headers.
+_WEEKDAYS = {
+    "en": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+    "sc": ["周一", "周二", "周三", "周四", "周五", "周六", "周日"],
+    "tc": ["週一", "週二", "週三", "週四", "週五", "週六", "週日"],
+}
+# Full weekday names for the title date line.
+_WEEKDAYS_FULL = {
+    "en": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
+    "sc": ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"],
+    "tc": ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"],
+}
+
+
+def _fmt_title_date(d, lang):
+    """Format the big title date per language."""
+    if lang == "en":
+        return d.strftime("%A, %B %d, %Y")
+    wd = _WEEKDAYS_FULL[lang][d.weekday()]
+    return f"{d.year}年{d.month}月{d.day}日 {wd}"
+
+
+def _fmt_day_header(d, lang):
+    """Format a calendar day-column header, e.g. 'Mon 25 May' / '周一 5月25日'."""
+    wd = _WEEKDAYS[lang][d.weekday()]
+    if lang == "en":
+        return f'{wd} <font color="#c0c8d4">{d.strftime("%-d %b")}</font>'
+    return f'{wd} <font color="#c0c8d4">{d.month}月{d.day}日</font>'
+
+
+def _fmt_day_header_today(d, lang):
+    """Today's calendar header, with a highlighted weekday + TODAY tag."""
+    today_label = LABELS[lang]["today"]
+    if lang == "en":
+        wd = _WEEKDAYS[lang][d.weekday()]
+        return (f'<font color="#ffd166">{wd}</font> {d.strftime("%-d %b")}  '
+                f'<font color="#ffd166" size="7">· {today_label}</font>')
+    wd = _WEEKDAYS[lang][d.weekday()]
+    return (f'<font color="#ffd166">{wd}</font> {d.month}月{d.day}日  '
+            f'<font color="#ffd166" size="7">· {today_label}</font>')
+
+
+def _fmt_short_date(d, lang):
+    """Short date used in the 'beyond this week' overflow line."""
+    if lang == "en":
+        return d.strftime("%a %-d %b")
+    wd = _WEEKDAYS[lang][d.weekday()]
+    return f"{wd} {d.month}月{d.day}日"
 
 
 # ---------- Prices ----------
@@ -427,6 +642,218 @@ def verify_drivers(drivers):
     return drivers
 
 
+# ---------- Translation (EN -> SC / TC) ----------
+
+_STYLE_GUIDE = """You are a financial-press translator. Rewrite the English market-brief content into {lang_name}, following these rules EXACTLY.
+
+TRANSLATION DISCIPLINE:
+- REWRITE, don't translate literally. Take the facts and write fresh {lang_name} sentences in financial-press style. Never lift English sentence structure.
+- Topic-prominent: lead with the subject of interest, then what happened.
+- Use press action verbs ({verbs_hint}) instead of plain 上涨/下跌 (上漲/下跌).
+- Integrate attribution inline (e.g. 「据 X 报道」/「據 X 報導」), not parenthetically.
+- Drop English-style inline markers (no "HERO ·", "Read-through:", "Base case:").
+- Tickers stay in Latin (NVDA, TLT, D05.SI, 0992.HK, 005930.KS).
+- Numbers stay in Western digits + currency symbols ($96.31, never spelled out).
+- Acronyms stay in Latin: IPO, AI, GDP, CPI, PCE, NFP, FOMC, OPEC, WTI, VIX, ETF, DXY, M&A.
+
+{variant_block}
+
+COMPLIANCE (rewrite to hedged, non-advisory language):
+- "may possibly affect" -> 「可能影响」/「可能影響」or「市场关注」/「市場關注」(NEVER「将影响」/「將影響」or「必定」).
+- "investors should" -> REMOVE. Rewrite as 「市场参与者可能关注」/「市場參與者可能關注」.
+- "recommended" -> NEVER use 推荐/推薦. Use 「市场解读」/「市場解讀」or「市场观察」/「市場觀察」.
+- "fully priced in" -> 「市场已大致计入」/「市場已大致計入」(hedged, NOT「完全计入」/「完全計入」).
+- NEVER output: 投资者应/投資者應, 建议/建議+买卖, 推荐/推薦, 近乎确定/近乎確定, 完全计入/完全計入, 必涨/必漲, 必跌, 必定.
+
+You will receive a JSON object. Translate ONLY these text fields into {lang_name}: every "headline", every "body", every "event", every "markets", every "reason", every "categories" entry, every "source_title". 
+DO NOT translate or alter: any "date" field (keep the exact English string like "Tue, May 28" — it is parsed by code), any "source_url", any "symbol"/ticker, any "pct" or numeric value, the JSON keys themselves, or any **double-asterisk** markers (keep them around the same emphasized figures).
+For "categories": translate sector words (RATES->利率/利率, FED->美联储/聯準會, EARNINGS->财报/財報, ENERGY->能源, etc.) but keep acronyms (IPO, AI, GDP, CPI, PCE, FOMC, OPEC) in Latin.
+
+Output ONLY the translated JSON object with the identical structure and keys. No markdown fences, no commentary."""
+
+_VARIANT_SC = """SIMPLIFIED CHINESE (Mainland/SG) variant rules — use these forms, NEVER the Traditional ones:
+收益率 (NOT 殖利率), 概率 (NOT 機率), 软件 (NOT 軟體), 数据 (NOT 資料), 数据中心 (NOT 資料中心), 英伟达 (NOT 輝達), 信息 (NOT 資訊), 互联网 (NOT 網際網路), 环比/同比 (NOT 月增/年增), 内存 (NOT 記憶體), 服务器 (NOT 伺服器), 霍尔木兹海峡 (NOT 荷姆茲海峽), 芯片/半导体 (NOT 晶片/半導體), 期货 (NOT 期貨), 特朗普 (NOT 川普), 鲍威尔 (NOT 鮑爾), 贝森特 (NOT 貝森特), 韩综 (NOT 韓綜). Use Simplified characters throughout."""
+
+_VARIANT_TC = """TRADITIONAL CHINESE (Taiwan default) variant rules — use these forms, NEVER the Simplified ones:
+殖利率 (NOT 收益率), 機率 (NOT 概率), 軟體 (NOT 软件), 資料 (NOT 数据), 資料中心 (NOT 数据中心), 輝達 (NOT 英伟达), 資訊 (NOT 信息), 網際網路 (NOT 互联网), 月增/年增 (NOT 环比/同比), 記憶體 (NOT 内存), 伺服器 (NOT 服务器), 荷姆茲海峽 (NOT 霍尔木兹海峡), 晶片/半導體 (NOT 芯片/半导体), 期貨 (NOT 期货), 川普 (NOT 特朗普), 鮑爾 (NOT 鲍威尔), 貝森特 (NOT 贝森特), 韓綜 (NOT 韩综). Use Traditional characters throughout."""
+
+
+# High-confidence terminology normalization. Maps any non-target spelling (in
+# either script) to the correct variant for the target language. Only includes
+# distinctive financial/tech terms and proper nouns where the 1:1 mapping is
+# unambiguous, so we never corrupt ordinary words.
+_VARIANT_FIX = {
+    "tc": {  # force Taiwan-standard terminology
+        "輝達": ["英伟达", "英偉達", "辉达"],
+        "川普": ["特朗普"],
+        "鮑爾": ["鲍威尔", "鮑威爾"],
+        "貝森特": ["贝森特"],
+        "殖利率": ["收益率"],
+        "機率": ["概率"],
+        "軟體": ["软件", "軟件"],
+        "記憶體": ["内存", "內存"],
+        "伺服器": ["服务器", "服務器"],
+        "晶片": ["芯片"],
+        "半導體": ["半导体"],
+        "資訊": ["信息"],
+        "網際網路": ["互联网", "互聯網"],
+        "資料中心": ["数据中心", "數據中心"],
+        "荷姆茲": ["霍尔木兹", "霍爾木茲"],
+        "期貨": ["期货"],
+        "月增": ["环比", "環比"],
+        "年增": ["同比"],
+    },
+    "sc": {  # force Mainland/SG-standard terminology
+        "英伟达": ["輝達", "辉达", "英偉達"],
+        "特朗普": ["川普"],
+        "鲍威尔": ["鮑爾", "鮑威爾"],
+        "贝森特": ["貝森特"],
+        "收益率": ["殖利率"],
+        "概率": ["機率"],
+        "软件": ["軟體", "軟件"],
+        "内存": ["記憶體", "內存"],
+        "服务器": ["伺服器", "服務器"],
+        "芯片": ["晶片"],
+        "半导体": ["半導體"],
+        "信息": ["資訊"],
+        "互联网": ["網際網路", "互聯網"],
+        "数据中心": ["資料中心", "數據中心"],
+        "霍尔木兹": ["荷姆茲", "霍爾木茲"],
+        "期货": ["期貨"],
+        "环比": ["月增"],
+        "同比": ["年增"],
+    },
+}
+
+# Compliance: collapse over-confident / advisory phrasing to hedged forms.
+_COMPLIANCE_FIX = {
+    "sc": {"完全计入": "大致计入", "推荐": "市场观察", "近乎确定": "市场预期"},
+    "tc": {"完全計入": "大致計入", "推薦": "市場觀察", "近乎確定": "市場預期"},
+}
+# Phrases that should never appear — logged as warnings for manual review.
+_COMPLIANCE_WARN = {
+    "sc": ["投资者应", "必涨", "必跌", "必定"],
+    "tc": ["投資者應", "必漲", "必跌", "必定"],
+}
+
+
+def _enforce_variants(text, lang):
+    """Apply high-confidence variant + compliance normalization to one string."""
+    if lang not in ("sc", "tc") or not text:
+        return text
+    for target, sources in _VARIANT_FIX[lang].items():
+        for s in sources:
+            if s in text:
+                text = text.replace(s, target)
+    for bad, good in _COMPLIANCE_FIX[lang].items():
+        if bad in text:
+            text = text.replace(bad, good)
+    return text
+
+
+def _scrub_translation(brief_data, lang):
+    """Walk the translated brief and normalize every text field in place.
+    Returns (brief_data, warnings)."""
+    warnings = []
+    fix = lambda s: _enforce_variants(s, lang)
+
+    for d in brief_data.get("drivers", []):
+        for k in ("headline", "body", "source_title"):
+            if d.get(k):
+                d[k] = fix(d[k])
+    for c in brief_data.get("catalysts_ahead", []):
+        if c.get("event"):
+            c["event"] = fix(c["event"])
+    for c in brief_data.get("market_closures", []):
+        for k in ("markets", "reason"):
+            if c.get(k):
+                c[k] = fix(c[k])
+    for dev in brief_data.get("developments_to_watch", []):
+        for k in ("headline", "body"):
+            if dev.get(k):
+                dev[k] = fix(dev[k])
+        if dev.get("categories"):
+            dev["categories"] = [fix(x) for x in dev["categories"]]
+
+    blob = json.dumps(brief_data, ensure_ascii=False)
+    for bad in _COMPLIANCE_WARN.get(lang, []):
+        if bad in blob:
+            warnings.append(bad)
+    return brief_data, warnings
+
+
+def translate_brief(brief_data, lang, gemini_key):
+    """Translate the model-generated text fields of brief_data into SC or TC,
+    following the financial-press style guide. Returns a new translated dict.
+    Date fields, tickers, URLs and numbers are preserved verbatim."""
+    if lang == "en":
+        return brief_data
+
+    lang_name = "Simplified Chinese (简体中文)" if lang == "sc" else "Traditional Chinese (繁體中文)"
+    verbs_hint = ("飙升/走强/收高/应声下挫/续创新高/失守/收复/回吐/走疲" if lang == "sc"
+                  else "飆升/走強/收高/應聲下挫/續創新高/失守/收復/回吐/走疲")
+    variant_block = _VARIANT_SC if lang == "sc" else _VARIANT_TC
+
+    system = _STYLE_GUIDE.format(
+        lang_name=lang_name, verbs_hint=verbs_hint, variant_block=variant_block,
+    )
+    # Only send the translatable subset to keep the model focused
+    payload = {
+        "drivers": brief_data.get("drivers", []),
+        "catalysts_ahead": brief_data.get("catalysts_ahead", []),
+        "market_closures": brief_data.get("market_closures", []),
+        "developments_to_watch": brief_data.get("developments_to_watch", []),
+    }
+    prompt = system + "\n\nJSON to translate:\n" + json.dumps(payload, ensure_ascii=False)
+
+    client = genai.Client(api_key=gemini_key)
+    config = types.GenerateContentConfig(temperature=0.4)
+    models_to_try = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"]
+    backoff_seconds = [15, 30]
+    last_error = None
+
+    for model_name in models_to_try:
+        for attempt in range(len(backoff_seconds) + 1):
+            try:
+                response = client.models.generate_content(
+                    model=model_name, contents=prompt, config=config,
+                )
+                translated = _extract_json(response.text)
+                # Merge back: keep verified impacted_tickers from the English
+                # drivers (they hold {symbol, pct} dicts we don't want re-translated).
+                out = dict(brief_data)
+                for key in ("drivers", "catalysts_ahead", "market_closures",
+                            "developments_to_watch"):
+                    if key in translated:
+                        out[key] = translated[key]
+                # Restore impacted_tickers (verified) onto drivers by position
+                en_drivers = brief_data.get("drivers", [])
+                for i, d in enumerate(out.get("drivers", [])):
+                    if i < len(en_drivers):
+                        d["impacted_tickers"] = en_drivers[i].get("impacted_tickers", [])
+                        # Preserve source_url verbatim (URL must not be translated)
+                        d["source_url"] = en_drivers[i].get("source_url", "")
+                # Enforce SC/TC variant discipline + compliance scrub
+                out, warns = _scrub_translation(out, lang)
+                if warns:
+                    print(f"  Translation [{lang}] compliance warnings: {warns}")
+                return out
+            except Exception as e:
+                last_error = e
+                msg = str(e)
+                transient = any(t in msg for t in
+                                ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "INTERNAL"))
+                if not transient or attempt >= len(backoff_seconds):
+                    print(f"  Translation [{lang}] failed on {model_name}: "
+                          f"{type(e).__name__}: {msg[:160]}")
+                    break
+                wait = backoff_seconds[attempt]
+                print(f"  Translation [{lang}] transient error; retry in {wait}s...")
+                time.sleep(wait)
+
+    raise last_error
+
+
 # ---------- PDF ----------
 
 def fmt_close(value, kind):
@@ -442,13 +869,15 @@ def fmt_pct(pct):
     return f"{sign}{abs(pct):.2f}%"
 
 
-def _section_header(title, subtitle=None, total_width_cm=17.0):
+def _section_header(title, subtitle=None, total_width_cm=17.0, lang="en"):
     """Navy bar with a red left-accent stripe and a white title.
     The optional subtitle renders in muted grey, separated by a bullet."""
     title_style = ParagraphStyle(
-        "sechdr_title", fontName="Helvetica-Bold", fontSize=11,
-        textColor=colors.white, leading=14,
+        "sechdr_title", fontName=_prose_font_bold(lang), fontSize=11,
+        textColor=colors.white, leading=15,
     )
+    title = _sanitize_cjk(title, lang)
+    subtitle = _sanitize_cjk(subtitle, lang)
     if subtitle:
         text = (f"{title}  "
                 f"<font color='#9aa6b8' size='9'>·  {subtitle}</font>")
@@ -505,12 +934,12 @@ def _parse_event_date(s, sgt_date):
     return None
 
 
-def _build_forward_calendar(sgt_date, catalysts, closures):
+def _build_forward_calendar(sgt_date, catalysts, closures, lang="en"):
     """5-column horizontal calendar combining catalysts and market closures.
 
     Layout:
-      Row 0: day labels (Mon 25 May, Tue 26 May, ...) on dark navy bg, white text.
-      Row 1: per-day content cell — closures rendered in red bold at top,
+      Row 0: day labels (Mon 25 May / 周一 5月25日) on dark navy bg, white text.
+      Row 1: per-day content cell — closures rendered in red at top,
              events in normal text below. Empty days show '—'.
 
     Returns (table, overflow_events, overflow_closures) where overflow lists
@@ -523,17 +952,21 @@ def _build_forward_calendar(sgt_date, catalysts, closures):
         week_start = sgt_date + timedelta(days=(7 - weekday))
     days = [week_start + timedelta(days=i) for i in range(5)]
 
+    # Closures use an en-dash separator (CJK font lacks it? it has U+2013) — use
+    # a localized separator that the CJK font supports.
+    sep = " — " if lang == "en" else "·"
+
     day_content = {d: {"closures": [], "events": []} for d in days}
     overflow_events = []
     overflow_closures = []
 
     for c in (closures or []):
         d = _parse_event_date(c.get("date", ""), sgt_date)
-        markets = (c.get("markets") or "").strip()
-        reason = (c.get("reason") or "").strip()
+        markets = _sanitize_cjk((c.get("markets") or "").strip(), lang)
+        reason = _sanitize_cjk((c.get("reason") or "").strip(), lang)
         if not (markets or reason):
             continue
-        line = f"{markets} — {reason}" if (markets and reason) else (markets or reason)
+        line = f"{markets}{sep}{reason}" if (markets and reason) else (markets or reason)
         if d in day_content:
             day_content[d]["closures"].append(line)
         else:
@@ -541,7 +974,7 @@ def _build_forward_calendar(sgt_date, catalysts, closures):
 
     for c in (catalysts or []):
         d = _parse_event_date(c.get("date", ""), sgt_date)
-        event = (c.get("event") or "").strip()
+        event = _sanitize_cjk((c.get("event") or "").strip(), lang)
         if not event:
             continue
         if d in day_content:
@@ -549,22 +982,24 @@ def _build_forward_calendar(sgt_date, catalysts, closures):
         else:
             overflow_events.append((d, event))
 
+    pfont = _prose_font(lang)
+    pfont_b = _prose_font_bold(lang)
     # Cell paragraph styles
     closure_style = ParagraphStyle(
-        "cal_closure", fontName="Helvetica-Bold", fontSize=7.5,
-        textColor=COL_ACCENT, leading=10, spaceAfter=2,
+        "cal_closure", fontName=pfont_b, fontSize=7.5,
+        textColor=COL_ACCENT, leading=11, spaceAfter=2,
     )
     event_style = ParagraphStyle(
-        "cal_event", fontName="Helvetica", fontSize=8,
-        textColor=COL_TEXT, leading=10.5, spaceAfter=2,
+        "cal_event", fontName=pfont, fontSize=8,
+        textColor=COL_TEXT, leading=11, spaceAfter=2,
     )
     empty_style = ParagraphStyle(
-        "cal_empty", fontName="Helvetica", fontSize=8,
+        "cal_empty", fontName=pfont, fontSize=8,
         textColor=colors.HexColor("#bbbbbb"), leading=10, alignment=1,
     )
     hdr_style = ParagraphStyle(
-        "cal_hdr", fontName="Helvetica-Bold", fontSize=8.5,
-        textColor=colors.white, leading=11,
+        "cal_hdr", fontName=pfont_b, fontSize=8.5,
+        textColor=colors.white, leading=12,
     )
 
     # Header row — highlight today with a yellow accent
@@ -573,12 +1008,9 @@ def _build_forward_calendar(sgt_date, catalysts, closures):
     for i, d in enumerate(days):
         if d == sgt_date:
             today_idx = i
-            label = (f'<font color="#ffd166">{d.strftime("%a")}</font> '
-                     f'{d.strftime("%-d %b")}  '
-                     f'<font color="#ffd166" size="7">· TODAY</font>')
+            label = _fmt_day_header_today(d, lang)
         else:
-            label = (f'{d.strftime("%a")} '
-                     f'<font color="#c0c8d4">{d.strftime("%-d %b")}</font>')
+            label = _fmt_day_header(d, lang)
         header_cells.append(Paragraph(label, hdr_style))
 
     # Content row — list of Paragraphs per cell (ReportLab handles vertical stack)
@@ -635,34 +1067,39 @@ def _highlight_emphasis(text, color="#a01d2e"):
     )
 
 
-def _build_development_item(num, dev):
+def _build_development_item(num, dev, lang="en"):
     """Render one 'developments to watch' item with red left bar, a numbered
-    headline, category tags right-aligned at top, body, and impacted tickers
-    at the bottom. Visual style mirrors the 'Developments to Watch' sections
-    in finance briefs."""
+    headline, category tags right-aligned at top, and body. Visual style mirrors
+    the 'Developments to Watch' sections in finance briefs."""
+    pfont = _prose_font(lang)
+    pfont_b = _prose_font_bold(lang)
     headline_style = ParagraphStyle(
-        "dev_headline", fontName="Helvetica-Bold", fontSize=10.5,
-        textColor=COL_TEXT, leading=14,
+        "dev_headline", fontName=pfont_b, fontSize=10.5,
+        textColor=COL_TEXT, leading=15,
     )
     cat_style = ParagraphStyle(
-        "dev_cat", fontName="Helvetica-Bold", fontSize=8.5,
+        "dev_cat", fontName=pfont_b, fontSize=8.5,
         textColor=COL_ACCENT, leading=13, alignment=2,  # right-aligned
     )
     body_style = ParagraphStyle(
-        "dev_body", fontName="Helvetica", fontSize=9.5,
-        textColor=COL_TEXT, leading=14,
+        "dev_body", fontName=pfont, fontSize=9.5,
+        textColor=COL_TEXT, leading=15,
     )
 
-    headline_html = _highlight_emphasis(
-        f'<b>{num}.</b>&nbsp;&nbsp;{dev.get("headline", "")}'
-    )
-    body_html = _highlight_emphasis(dev.get("body", ""))
+    headline_txt = _sanitize_cjk(dev.get("headline", ""), lang)
+    body_txt = _sanitize_cjk(dev.get("body", ""), lang)
+    headline_html = _highlight_emphasis(f'<b>{num}.</b>&nbsp;&nbsp;{headline_txt}')
+    body_html = _highlight_emphasis(body_txt)
 
     headline_para = Paragraph(headline_html, headline_style)
 
     cats = dev.get("categories") or []
     if cats:
-        cat_text = "  ·  ".join(str(c).strip().upper() for c in cats if str(c).strip())
+        # Latin tags get upper-cased; CJK tags pass through unchanged
+        def _fmt_cat(c):
+            c = _sanitize_cjk(str(c).strip(), lang)
+            return c.upper() if c.isascii() else c
+        cat_text = "  ·  ".join(_fmt_cat(c) for c in cats if str(c).strip())
         cat_para = Paragraph(cat_text, cat_style)
     else:
         cat_para = Paragraph("", cat_style)
@@ -703,7 +1140,8 @@ def _build_development_item(num, dev):
 
 
 def build_pdf(out_path, sgt_date_str, us_close_str, prices, drivers, catalysts,
-              market_closures=None, developments_to_watch=None, sgt_date=None):
+              market_closures=None, developments_to_watch=None, sgt_date=None,
+              lang="en"):
     # Resolve sgt_date for the Forward calendar window. Prefer the explicit
     # kwarg; otherwise parse sgt_date_str (format produced by main()).
     if sgt_date is None:
@@ -711,52 +1149,73 @@ def build_pdf(out_path, sgt_date_str, us_close_str, prices, drivers, catalysts,
             sgt_date = datetime.strptime(sgt_date_str, "%A, %B %d, %Y").date()
         except ValueError:
             sgt_date = datetime.now(ZoneInfo("Asia/Singapore")).date()
+
+    L = LABELS[lang]
+    pfont = _prose_font(lang)
+    pfont_b = _prose_font_bold(lang)
+    # Localized date strings
+    title_date = _fmt_title_date(sgt_date, lang)
+    if lang == "en":
+        us_close_disp = us_close_str
+    else:
+        # us_close_str is an English date like "Wednesday, May 27"; reformat
+        try:
+            ucd = datetime.strptime(f"{us_close_str}, {sgt_date.year}",
+                                    "%A, %B %d, %Y").date()
+            us_close_disp = _fmt_short_date(ucd, lang)
+        except ValueError:
+            us_close_disp = us_close_str
+
     doc = SimpleDocTemplate(
         out_path, pagesize=A4,
         topMargin=1.6*cm, bottomMargin=1.6*cm,
         leftMargin=2*cm, rightMargin=2*cm,
-        title=f"Market brief — {sgt_date_str}",
+        title=f"Market brief — {title_date}",
         author="Daily market brief",
     )
-    eyebrow = ParagraphStyle("eyebrow", fontName="Helvetica", fontSize=8.5,
+    eyebrow = ParagraphStyle("eyebrow", fontName=pfont, fontSize=8.5,
                              textColor=COL_DIM, leading=11, spaceAfter=4)
-    h1 = ParagraphStyle("h1", fontName="Helvetica", fontSize=18,
-                        textColor=COL_TEXT, leading=22)
-    h2 = ParagraphStyle("h2", fontName="Helvetica-Bold", fontSize=13,
-                        textColor=COL_TEXT, leading=16, spaceAfter=2)
-    h3 = ParagraphStyle("h3", fontName="Helvetica-Bold", fontSize=10.5,
-                        textColor=COL_TEXT, leading=14, spaceAfter=3)
-    body = ParagraphStyle("body", fontName="Helvetica", fontSize=9.5,
-                          textColor=COL_TEXT, leading=14)
-    muted = ParagraphStyle("muted", fontName="Helvetica", fontSize=9,
-                           textColor=COL_MUTED, leading=12, spaceAfter=6)
-    src = ParagraphStyle("src", fontName="Helvetica", fontSize=7.5,
-                         textColor=COL_DIM, leading=10, spaceBefore=4)
+    h1 = ParagraphStyle("h1", fontName=pfont, fontSize=18,
+                        textColor=COL_TEXT, leading=24)
+    h3 = ParagraphStyle("h3", fontName=pfont_b, fontSize=10.5,
+                        textColor=COL_TEXT, leading=15, spaceAfter=3)
+    body = ParagraphStyle("body", fontName=pfont, fontSize=9.5,
+                          textColor=COL_TEXT, leading=15)
+    # Numeric/Latin styles always use Helvetica for crisp digits + proper signs
+    body_latin = ParagraphStyle("body_latin", fontName="Helvetica", fontSize=9.5,
+                                textColor=COL_TEXT, leading=14)
+    src = ParagraphStyle("src", fontName=pfont, fontSize=7.5,
+                         textColor=COL_DIM, leading=11, spaceBefore=4)
 
     story = []
-    story.append(Paragraph("DAILY MARKET BRIEF", eyebrow))
-    story.append(Paragraph(sgt_date_str, h1))
+    story.append(Paragraph(L["eyebrow"], eyebrow))
+    story.append(Paragraph(title_date, h1))
     story.append(HRFlowable(width="100%", thickness=0.5, color=COL_BORDER,
                             spaceBefore=4, spaceAfter=14))
 
     # Snapshot
-    story.append(_section_header("Market snapshot",
-                                 f"Closes as of {us_close_str}"))
+    story.append(_section_header(L["snapshot"],
+                                 L["snapshot_sub"].format(date=us_close_disp),
+                                 lang=lang))
     story.append(Spacer(1, 8))
-    data = [["Asset", "Close", "Day %"]]
+    names = DISPLAY_NAMES.get(lang, DISPLAY_NAMES["en"])
+    data = [[L["col_asset"], L["col_close"], L["col_pct"]]]
     st = [
-        ("FONT", (0,0), (-1,0), "Helvetica-Bold", 8.5),
+        # Header row uses the prose font so localized labels render (CJK-safe)
+        ("FONT", (0,0), (-1,0), pfont_b, 8.5),
         ("TEXTCOLOR", (0,0), (-1,0), COL_MUTED),
         ("ALIGN", (1,0), (-1,-1), "RIGHT"),
-        ("FONT", (0,1), (-1,-1), "Helvetica", 10),
+        # Asset-name column in prose font; numeric columns in Helvetica
+        ("FONT", (0,1), (0,-1), pfont, 10),
+        ("FONT", (1,1), (-1,-1), "Helvetica", 10),
         ("TEXTCOLOR", (0,1), (-1,-1), COL_TEXT),
         ("LINEBELOW", (0,0), (-1,0), 0.5, COL_BORDER),
         ("TOPPADDING", (0,0), (-1,-1), 6),
         ("BOTTOMPADDING", (0,0), (-1,-1), 6),
     ]
     for i, p in enumerate(prices, start=1):
-        data.append([p["display"], fmt_close(p["close"], p["kind"]),
-                     fmt_pct(p["pct"])])
+        disp = names.get(p["symbol"], p["display"])
+        data.append([disp, fmt_close(p["close"], p["kind"]), fmt_pct(p["pct"])])
         c = COL_POS if p["pct"] >= 0 else COL_NEG
         st.append(("TEXTCOLOR", (2,i), (2,i), c))
         st.append(("FONT", (2,i), (2,i), "Helvetica-Bold", 10))
@@ -769,14 +1228,13 @@ def build_pdf(out_path, sgt_date_str, us_close_str, prices, drivers, catalysts,
     story.append(Spacer(1, 18))
 
     # Drivers
-    story.append(_section_header("Top market drivers",
-                                 "What moved markets and which names felt it"))
+    story.append(_section_header(L["drivers"], L["drivers_sub"], lang=lang))
     story.append(Spacer(1, 8))
     for i, d in enumerate(drivers, start=1):
-        headline_html = _highlight_emphasis(
-            f'<b>{i}.</b>&nbsp;&nbsp;{d.get("headline", "")}'
-        )
-        body_html = _highlight_emphasis(d.get("body", ""))
+        headline_txt = _sanitize_cjk(d.get("headline", ""), lang)
+        body_txt = _sanitize_cjk(d.get("body", ""), lang)
+        headline_html = _highlight_emphasis(f'<b>{i}.</b>&nbsp;&nbsp;{headline_txt}')
+        body_html = _highlight_emphasis(body_txt)
         block = [Paragraph(headline_html, h3), Paragraph(body_html, body)]
         if d.get("impacted_tickers"):
             parts = []
@@ -788,19 +1246,23 @@ def build_pdf(out_path, sgt_date_str, us_close_str, prices, drivers, catalysts,
                     f'<font color="{hx}"><b>{sign}{abs(t["pct"]):.2f}%</b></font>'
                 )
             block.append(Spacer(1, 4))
-            block.append(Paragraph(
-                f'<i>Impacted:</i>&nbsp;&nbsp;{"  ·  ".join(parts)}', body))
+            # Impacted label in prose font; tickers/pcts in Helvetica (Latin)
+            impacted_html = (
+                f'<font name="{pfont}"><i>{L["impacted"]}</i></font>&nbsp;&nbsp;'
+                + "  ·  ".join(parts)
+            )
+            block.append(Paragraph(impacted_html, body_latin))
         # Prefer a real article URL from Marketaux when Gemini attached one;
         # fall back to a Google News search link otherwise.
         source_url = (d.get("source_url") or "").strip()
-        source_title = (d.get("source_title") or "").strip()
+        source_title = _sanitize_cjk((d.get("source_title") or "").strip(), lang)
         is_real_url = (
             source_url.startswith("http")
             and "grounding-api-redirect" not in source_url
             and "vertexaisearch.cloud.google.com" not in source_url
         )
         if is_real_url:
-            label = source_title if source_title else "Read the full article"
+            label = source_title if source_title else L["read_article"]
             link_html = (
                 f'<a href="{source_url}"><font color="#1a5fb4"><u>{label}</u></font></a>'
             )
@@ -812,7 +1274,7 @@ def build_pdf(out_path, sgt_date_str, us_close_str, prices, drivers, catalysts,
             news_url = f"https://news.google.com/search?q={q}"
             link_html = (
                 f'<a href="{news_url}"><font color="#1a5fb4">'
-                f'<u>Find articles on Google News &rarr;</u></font></a>'
+                f'<u>{L["find_news"]}</u></font></a>'
             )
         block.append(Paragraph(link_html, src))
         story.append(KeepTogether(block))
@@ -821,72 +1283,68 @@ def build_pdf(out_path, sgt_date_str, us_close_str, prices, drivers, catalysts,
     # Forward calendar — combined market closures + catalysts (Fed events,
     # data releases, earnings) laid out as a horizontal week view.
     story.append(Spacer(1, 8))
-    story.append(_section_header(
-        "Forward calendar",
-        "This week · holidays, Fed events, data releases & earnings",
-    ))
+    story.append(_section_header(L["calendar"], L["calendar_sub"], lang=lang))
     # Small legend right under the header bar so the red bullets are unambiguous.
     legend_style = ParagraphStyle(
-        "cal_legend", fontName="Helvetica", fontSize=8,
+        "cal_legend", fontName=pfont, fontSize=8,
         textColor=COL_MUTED, leading=10, alignment=2,  # right-aligned
         spaceBefore=4, spaceAfter=4,
     )
     story.append(Paragraph(
-        '<font color="#a01d2e"><b>●</b></font>&nbsp;&nbsp;indicates market closure',
+        f'<font color="#a01d2e"><b>●</b></font>&nbsp;&nbsp;{L["legend"]}',
         legend_style,
     ))
 
     cal_tbl, overflow_events, overflow_closures = _build_forward_calendar(
-        sgt_date, catalysts or [], market_closures or [],
+        sgt_date, catalysts or [], market_closures or [], lang=lang,
     )
     story.append(cal_tbl)
 
     # If any items fall outside the visible Mon-Fri window, list them below
     if overflow_events or overflow_closures:
+        sep = " · "
         more_lines = []
         for d, line in overflow_closures:
-            ds = d.strftime("%a %-d %b") if d else "Date?"
+            ds = _fmt_short_date(d, lang) if d else "?"
             more_lines.append(
-                f'<font color="#a01d2e"><b>●</b></font> <b>{ds}</b> · {line}'
+                f'<font color="#a01d2e"><b>●</b></font> <b>{ds}</b>{sep}{line}'
             )
         for d, line in overflow_events:
-            ds = d.strftime("%a %-d %b") if d else "Date?"
-            more_lines.append(f'<b>{ds}</b> · {line}')
+            ds = _fmt_short_date(d, lang) if d else "?"
+            more_lines.append(f'<b>{ds}</b>{sep}{line}')
         if more_lines:
             extra_style = ParagraphStyle(
-                "extra_cal", fontName="Helvetica", fontSize=8.5,
-                textColor=COL_MUTED, leading=12,
+                "extra_cal", fontName=pfont, fontSize=8.5,
+                textColor=COL_MUTED, leading=13,
             )
             story.append(Spacer(1, 6))
             story.append(Paragraph(
-                "<b>Beyond this week:</b>  " + "  ·  ".join(more_lines),
+                f'<b>{L["beyond"]}</b>  ' + "  ·  ".join(more_lines),
                 extra_style,
             ))
 
-    # Developments to watch into the next session — forward-looking setup
-    # items styled with a red left bar, numbered continuing from drivers
-    # (so the brief reads as one continuous 1-6 narrative).
+    # Developments to watch — forward-looking events, numbered continuing
+    # from drivers so the brief reads as one continuous list.
     if developments_to_watch:
         story.append(Spacer(1, 18))
-        story.append(_section_header(
-            "Developments to watch into the next session",
-            "Notable scheduled events beyond the forward calendar",
-        ))
+        story.append(_section_header(L["developments"], L["developments_sub"],
+                                     lang=lang))
         story.append(Spacer(1, 8))
-        # Items numbered starting at len(drivers) + 1 so drivers (1-3) and
-        # developments (4-6) form a continuous list.
         start_num = (len(drivers) if drivers else 3) + 1
         for offset, dev in enumerate(developments_to_watch):
-            story.append(_build_development_item(start_num + offset, dev))
+            story.append(_build_development_item(start_num + offset, dev, lang=lang))
             story.append(Spacer(1, 10))
+
+    footer_text = L["footer"]
+    footer_font = pfont if lang in ("sc", "tc") and _cjk_state.get("available") else "Helvetica"
+    page_label = L["page"]
 
     def footer(canvas, doc):
         canvas.saveState()
-        canvas.setFont("Helvetica", 7.5)
+        canvas.setFont(footer_font, 7.5)
         canvas.setFillColor(COL_DIM)
-        canvas.drawRightString(A4[0] - 2*cm, 1*cm, f"Page {doc.page}")
-        canvas.drawString(2*cm, 1*cm,
-            "Generated automatically · prices from Yahoo Finance · news via Gemini + Google Search")
+        canvas.drawRightString(A4[0] - 2*cm, 1*cm, page_label.format(n=doc.page))
+        canvas.drawString(2*cm, 1*cm, footer_text)
         canvas.restoreState()
 
     doc.build(story, onFirstPage=footer, onLaterPages=footer)
@@ -894,7 +1352,11 @@ def build_pdf(out_path, sgt_date_str, us_close_str, prices, drivers, catalysts,
 
 # ---------- Email ----------
 
-def send_email(pdf_path, recipient, gmail_user, gmail_pw, subject, sgt_date_str):
+def send_email(pdf_paths, recipient, gmail_user, gmail_pw, subject, sgt_date_str):
+    """Attach one or more PDFs to a single email. pdf_paths may be a single
+    path (str) or a list of paths."""
+    if isinstance(pdf_paths, (str, Path)):
+        pdf_paths = [pdf_paths]
     # Support comma-separated list of recipients in the RECIPIENT_EMAIL secret
     recipients = [r.strip() for r in recipient.split(",") if r.strip()]
     msg = MIMEMultipart()
@@ -902,15 +1364,17 @@ def send_email(pdf_path, recipient, gmail_user, gmail_pw, subject, sgt_date_str)
     msg["To"] = ", ".join(recipients)
     msg["Subject"] = subject
     text = (
-        f"Your daily market brief for {sgt_date_str} is attached.\n\n"
-        "Sent automatically by your market-brief GitHub Action."
+        f"Your daily market brief for {sgt_date_str} is attached in three "
+        "editions: English (-en), Simplified Chinese (-sc), and Traditional "
+        "Chinese (-tc).\n\nSent automatically by your market-brief GitHub Action."
     )
     msg.attach(MIMEText(text, "plain"))
-    with open(pdf_path, "rb") as f:
-        attach = MIMEApplication(f.read(), _subtype="pdf")
-        attach.add_header("Content-Disposition", "attachment",
-                          filename=Path(pdf_path).name)
-        msg.attach(attach)
+    for pdf_path in pdf_paths:
+        with open(pdf_path, "rb") as f:
+            attach = MIMEApplication(f.read(), _subtype="pdf")
+            attach.add_header("Content-Disposition", "attachment",
+                              filename=Path(pdf_path).name)
+            msg.attach(attach)
     ctx = ssl.create_default_context()
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ctx) as server:
         server.login(gmail_user, gmail_pw)
@@ -986,21 +1450,45 @@ def main():
 
     print("Verifying impacted tickers against yfinance...")
     drivers = verify_drivers(brief_data["drivers"])
+    brief_data["drivers"] = drivers
     developments = brief_data.get("developments_to_watch") or []
 
-    print("Building PDF...")
-    pdf_path = f"/tmp/market-brief-{sgt_date.isoformat()}.pdf"
-    build_pdf(
-        pdf_path, sgt_date_str, us_close_str, prices, drivers,
-        brief_data["catalysts_ahead"],
-        market_closures=brief_data.get("market_closures") or [],
-        developments_to_watch=developments,
-        sgt_date=sgt_date,
-    )
+    # Register the embedded CJK font (needed for SC/TC editions).
+    cjk_ok = _ensure_cjk_font()
 
-    print(f"Emailing to {recipient}...")
+    # Build the per-language brief data: English as-is, then translations.
+    editions = {"en": brief_data}
+    for lang in ("sc", "tc"):
+        if not cjk_ok:
+            print(f"Skipping {lang} edition (no CJK font available).")
+            continue
+        try:
+            print(f"Translating brief -> {lang}...")
+            editions[lang] = translate_brief(brief_data, lang, gemini_key)
+        except Exception as e:
+            print(f"  WARN: {lang} translation failed ({type(e).__name__}); "
+                  "skipping this edition.")
+
+    print("Building PDFs...")
+    pdf_paths = []
+    for lang in LANGS:
+        if lang not in editions:
+            continue
+        bd = editions[lang]
+        out_path = f"/tmp/market-brief-{sgt_date.isoformat()}-{lang}.pdf"
+        build_pdf(
+            out_path, sgt_date_str, us_close_str, prices,
+            bd.get("drivers", drivers), bd.get("catalysts_ahead", []),
+            market_closures=bd.get("market_closures") or [],
+            developments_to_watch=bd.get("developments_to_watch") or [],
+            sgt_date=sgt_date, lang=lang,
+        )
+        pdf_paths.append(out_path)
+        print(f"  built {Path(out_path).name}")
+
+    print(f"Emailing {len(pdf_paths)} edition(s) to {recipient}...")
     subject = f"Market brief — {sgt_date.strftime('%a %b %d, %Y')}"
-    send_email(pdf_path, recipient, gmail_user, gmail_pw, subject,
+    send_email(pdf_paths, recipient, gmail_user, gmail_pw, subject,
                sgt_date_str)
     print("Done.")
 
