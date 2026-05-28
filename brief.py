@@ -455,7 +455,7 @@ Then output ONLY a JSON object (no markdown fences, no preamble, no commentary) 
     {{
       "headline": "Short punchy headline under 12 words",
       "body": "4-6 sentences explaining what happened, why it mattered, and how the market reacted. Specific and factual.",
-      "impacted_tickers": ["TICKER1", "TICKER2", "TICKER3", "TICKER4"],
+      "impacted_tickers": ["AFFECTED_STOCK_OR_SECTOR_ETF", "ANOTHER"],
       "source_url": "https://reuters.com/article-xyz (or empty string if no direct URL)",
       "source_title": "Original article title or empty string"
     }}
@@ -478,7 +478,7 @@ Then output ONLY a JSON object (no markdown fences, no preamble, no commentary) 
 }}
 
 Rules:
-- Exactly 3 drivers, ordered by market impact. A story being merely newsworthy is NOT enough; if markets didn't react, do not promote it to a driver. Each driver MUST satisfy at least ONE of the following inclusion criteria:
+- Provide 2 to 4 drivers, ordered by market impact (most impactful first). Select GLOBALLY — across US, Asia, Europe, commodities, rates, FX and geopolitics — whatever genuinely moved markets most, not just US equities. A story being merely newsworthy is NOT enough; if markets didn't react, do not include it. Each driver MUST satisfy at least ONE of the following inclusion thresholds:
   - Index move > 0.75%, or a sector ETF move > 1.5%
   - Single-stock move > 5% in a Magnificent 7 name, an S&P 100 constituent, or a major Asia heavyweight
   - Commodity move > 3%
@@ -486,9 +486,10 @@ Rules:
   - A central-bank decision, or an on-cycle macro release (CPI, PCE, NFP, GDP; jobless claims only if a genuine shock)
   - A geopolitical event with clear energy / safe-haven / risk-asset transmission (e.g. Strait of Hormuz, Taiwan Strait, Korean peninsula, US-China tariffs, Russia-Ukraine)
   - A major corporate event in a heavyweight name (earnings beat/miss WITH a stock move, M&A, or a guidance change)
-  If you genuinely cannot find three stories meeting any of the above, choose the next-most-impactful even if it falls slightly short, but never include throwaway commentary or routine policy meetings with negligible market reaction. Prioritize stories from the most recent 24-48 hours when impact is comparable.
+- QUALITY BAR / NO PADDING: Return only as many drivers as genuinely clear the bar above. Two strong drivers are far better than three padded ones — if only two stories qualify, return exactly two. NEVER manufacture a driver to reach a count, and NEVER include filler such as: the VIX or any volatility index simply rising/falling; "markets edged higher/lower"; generic "investor sentiment / confidence / risk appetite" with no concrete catalyst; an index closing only fractionally (<0.75%) up or down; or routine, low-impact commentary. A driver about volatility "easing" or "fear gauge" movement is BANNED unless it is itself a >2 std-dev event with a named cause. Only if a session is genuinely quiet and fewer than two stories clear the bar may you include the single next-most-impactful item — but even then, never a volatility/sentiment throwaway.
 - For driver headlines AND bodies, you may use **double asterisks** sparingly to highlight the 1-3 most important numbers/moves/levels (e.g., "Brent **−7%**", "**30Y 5.20% breach**"). These render as bold red in the PDF. Use only for genuinely market-moving figures, not decorative emphasis.
-- impacted_tickers (drivers): 3-5 real US-listed ticker symbols per driver. Standard symbols only (AAPL, NVDA, JPM, XLE, etc.). Never invent tickers.
+- impacted_tickers (drivers): 2-5 real US-listed symbols that ACTUALLY MOVED on this specific story. Use the affected individual stocks (e.g. NVDA, AAPL, JPM), sector ETFs (XLE, SMH, XLF, XLK), or bond ETFs (TLT, HYG, LQD). Do NOT use broad index-proxy ETFs — specifically NEVER SPY, QQQ, DIA, IWM, VOO or IVV — because the S&P 500, Nasdaq, Dow and Russell are already shown in the snapshot table above, so listing their ETFs is redundant and (on flat days) contradicts the snapshot. Only include names with a genuine move (roughly > 0.3%); never pad with names that barely moved. Pick tickers whose move is directionally consistent with the story. Standard symbols only; never invent tickers.
+- Prioritize stories from the most recent 24-48 hours when impact is comparable.
 - source_url and source_title: ALWAYS fill these from the curated Marketaux articles above whenever the driver is supported by one of them. If no curated article covers the story, leave both as empty strings (the PDF will fall back to a Google News search link). NEVER use a Vertex/grounding redirect URL — only real direct article URLs.
 - Make headlines specific enough that someone searching for them on Google News will find the actual articles you're referencing.
 - catalysts_ahead: items scheduled in the next 3 calendar days from today ({sgt_date_str}). Could be 1-6 items depending on what's on the calendar. Include FOMC / Fed meetings and speeches, US government and policy announcements, major economic data releases (CPI, PCE, GDP, NFP, jobless claims, retail sales, etc.), and major upcoming earnings (use real ticker symbols). Use real dates. Order chronologically.
@@ -581,7 +582,7 @@ def synthesize(prices, gemini_key, us_close_str, sgt_date_str,
     grounding_tool = types.Tool(google_search=types.GoogleSearch())
     config = types.GenerateContentConfig(
         tools=[grounding_tool],
-        temperature=0.3,
+        temperature=0.2,
     )
 
     # Retry on transient 503 / 429 / UNAVAILABLE errors with progressive backoff.
@@ -622,22 +623,64 @@ def synthesize(prices, gemini_key, us_close_str, sgt_date_str,
     raise last_error
 
 
-def verify_drivers(drivers):
-    """Verify impacted_tickers against yfinance. Accepts items where
-    impacted_tickers is a list of strings (raw from Gemini) or already-verified
-    dicts (idempotent). Returns drivers with dicts of {symbol, pct}."""
+# Broad index-proxy ETFs that merely duplicate the snapshot indices. Listing
+# them as 'impacted' is redundant and, on near-flat days, can show a move that
+# contradicts the index in the snapshot (e.g. SPY -0.02% vs S&P +0.02%). We drop
+# them outright and map them to the index we'd reconcile against.
+_INDEX_PROXY_ETFS = {
+    "SPY": "^GSPC", "VOO": "^GSPC", "IVV": "^GSPC", "SPLG": "^GSPC",
+    "QQQ": "^IXIC", "QQQM": "^IXIC",
+    "DIA": "^DJI",
+    "IWM": "^RUT", "VTWO": "^RUT",
+}
+
+# Minimum absolute move (%) for a name to count as genuinely "impacted".
+# Below this, a ticker isn't meaningfully part of the story and (near zero) is
+# where sign-flips happen, so we drop it.
+_MIN_IMPACT_MOVE = 0.25
+
+
+def verify_drivers(drivers, prices=None):
+    """Verify and sanity-check impacted_tickers against yfinance.
+
+    Guards applied to every impacted ticker:
+      - Drop broad index-proxy ETFs (SPY/QQQ/DIA/IWM/...) — redundant with the
+        snapshot and a frequent source of sign-flip contradictions.
+      - Drop tickers we can't price.
+      - Drop negligible moves (|pct| < _MIN_IMPACT_MOVE): an "impacted" name
+        should actually have moved, and near-zero is where the sign-flip the
+        reader noticed comes from.
+      - For any ticker that maps to a snapshot index, reconcile its sign with
+        the snapshot: if they disagree, trust the snapshot value (same source,
+        same session) rather than a separately-fetched figure.
+
+    Accepts raw strings or already-verified {symbol, pct} dicts (idempotent)."""
+    snapshot_pct = {p["symbol"]: p["pct"] for p in (prices or [])}
     for d in drivers:
         verified = []
         for sym in d.get("impacted_tickers", []):
             if isinstance(sym, dict) and "symbol" in sym and "pct" in sym:
-                verified.append(sym)  # already verified; pass through
-                continue
-            symbol = sym.get("symbol") if isinstance(sym, dict) else sym
+                symbol, pct = sym.get("symbol"), sym.get("pct")
+            else:
+                symbol = sym.get("symbol") if isinstance(sym, dict) else sym
+                pct = None
             if not symbol:
                 continue
-            pct = get_ticker_pct(symbol)
-            if pct is not None:
-                verified.append({"symbol": symbol, "pct": pct})
+            symbol = str(symbol).upper().strip()
+            # Drop redundant index-proxy ETFs
+            if symbol in _INDEX_PROXY_ETFS:
+                continue
+            if pct is None:
+                pct = get_ticker_pct(symbol)
+            if pct is None:
+                continue
+            # Reconcile against the snapshot when we track the same instrument
+            if symbol in snapshot_pct:
+                pct = snapshot_pct[symbol]
+            # Drop negligible / near-flat moves
+            if abs(pct) < _MIN_IMPACT_MOVE:
+                continue
+            verified.append({"symbol": symbol, "pct": round(pct, 2)})
         d["impacted_tickers"] = verified
     return drivers
 
@@ -1448,8 +1491,8 @@ def main():
         stale_markets, week_mon_str, week_fri_str, marketaux_articles,
     )
 
-    print("Verifying impacted tickers against yfinance...")
-    drivers = verify_drivers(brief_data["drivers"])
+    print("Verifying & sanity-checking impacted tickers against yfinance...")
+    drivers = verify_drivers(brief_data["drivers"], prices)
     brief_data["drivers"] = drivers
     developments = brief_data.get("developments_to_watch") or []
 
