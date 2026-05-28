@@ -255,9 +255,9 @@ Then output ONLY a JSON object (no markdown fences, no preamble, no commentary) 
   ],
   "developments_to_watch": [
     {{
-      "headline": "Short headline under 16 words. Use **double asterisks** to emphasize a key price/level (will render red).",
-      "body": "1-2 brief sentences describing the setup and what to watch. Concise, not exhaustive.",
-      "categories": ["RATES", "FED"]
+      "headline": "Name a specific upcoming event + its date, under 14 words. Use **markdown** to emphasize the date/name.",
+      "body": "1 brief sentence on why it matters or what to watch.",
+      "categories": ["TECH", "PRODUCT"]
     }}
   ]
 }}
@@ -270,10 +270,14 @@ Rules:
 - Make headlines specific enough that someone searching for them on Google News will find the actual articles you're referencing.
 - catalysts_ahead: items scheduled in the next 3 calendar days from today ({sgt_date_str}). Could be 1-6 items depending on what's on the calendar. Include FOMC / Fed meetings and speeches, US government and policy announcements, major economic data releases (CPI, PCE, GDP, NFP, jobless claims, retail sales, etc.), and major upcoming earnings (use real ticker symbols). Use real dates. Order chronologically.
 - market_closures: one entry per (date, holiday) pair. "markets" must be country names only (US, UK, Japan, Korea, Hong Kong, Singapore, China, Eurozone, Australia) — NEVER ticker symbols or index names. Group multiple countries observing the same holiday on the same date into one entry. Cover the FULL week {week_mon_str} to {week_fri_str}: include past closures already in the stale list AND any upcoming closures you find via search. Order chronologically. If no closures, return [].
-- developments_to_watch: exactly 2 brief setup-style items describing what to watch into upcoming sessions (next session through ~1-2 weeks out). These must be DISTINCT from everything else in this brief — do NOT repeat any of the 3 drivers above, and do NOT restate items already listed in catalysts_ahead or market_closures. If a topic is already covered as a driver or calendar item, pick something different. These are forward-looking SETUPS — positioning, a level being tested, a rumored/scheduled corporate event (IPO, M&A, antitrust ruling, major product launch, central-bank meeting beyond the next 3 days, OPEC, etc.), or a sector inflection — that aren't yet the day's story but could become one.
-  - headline: under 16 words, specific. Use **markdown** for 1 key emphasis if helpful.
-  - body: 1-2 brief sentences. Just enough to orient the reader on what the setup is and what to watch. Do NOT write a comprehensive analysis.
-  - categories: 2-3 short uppercase tags as an array. Pick from common buckets like: RATES, DURATION, FED, FOMC, INFLATION, MACRO, GROWTH, GDP, CPI, PCE, EARNINGS, AI, TECH, SEMIS, HBM, MEGACAP, CONSUMER, ENERGY, OIL, COMMODITIES, GOLD, M&A, IPO, ANTITRUST, REGULATION, ASIA, EM, CHINA, JAPAN, KOREA, INDIA, HOLIDAY, GEOPOLITICS, ELECTION, TARIFFS, TRADE, USD, FX, JPY, VOLATILITY, RISK, BREACH, POSITIONING. You may invent additional short tags if needed.
+- developments_to_watch: 0 to 2 SPECIFIC upcoming events worth flagging — each must be a concrete, named, scheduled-or-rumored event with a real date or approximate timeframe. Good examples: "Nvidia GTC keynote Jun 11", "Stripe expected to file S-1 in coming weeks", "Apple WWDC opens Jun 9", "OPEC+ ministerial Jun 1", "EU antitrust ruling on [company] expected mid-June", "[Company] Q2 earnings Jun 12". These are events that sit BEYOND the next-3-day calendar window and are NOT already shown anywhere else in this brief.
+  HARD RULES for this field:
+  1. EVENTS ONLY. Each item must name a specific, identifiable event (a keynote, a filing, a meeting, a ruling, a launch, a scheduled earnings date, a central-bank decision date, etc.). Do NOT write generic thematic commentary, market-outlook musings, or analysis. BANNED: vague headlines like "Federal Reserve's inflation stance", "AI sector momentum", "investors will monitor upcoming data", "watch for further earnings". If it isn't a nameable event with a when, it does NOT belong here.
+  2. NO OVERLAP. Do NOT include anything already listed in catalysts_ahead or market_closures, and do NOT repeat any of the 3 drivers. The forward calendar already covers the next 3 days of Fed events, data releases, earnings, and holidays — developments_to_watch is strictly for events FURTHER OUT than that window.
+  3. NO PADDING. If there are no specific notable events beyond the calendar window, return an empty array []. Do NOT invent filler to reach a count. Quality over quantity — zero good items is better than one vague one.
+  - headline: under 14 words, naming the event and its date/timeframe. Use **markdown** for 1 key emphasis (e.g., the date or name) if helpful.
+  - body: 1 brief sentence on why it matters / what to watch. Concise, not analytical.
+  - categories: 2-3 short uppercase tags as an array. Pick from common buckets like: RATES, FED, FOMC, INFLATION, MACRO, GDP, CPI, PCE, EARNINGS, AI, TECH, SEMIS, CONSUMER, ENERGY, OIL, OPEC, COMMODITIES, GOLD, M&A, IPO, ANTITRUST, REGULATION, ASIA, CHINA, JAPAN, KOREA, GEOPOLITICS, ELECTION, TARIFFS, FX, PRODUCT. You may invent additional short tags if needed.
 - Output ONLY the JSON object. Nothing before or after."""
 
 
@@ -859,7 +863,7 @@ def build_pdf(out_path, sgt_date_str, us_close_str, prices, drivers, catalysts,
         story.append(Spacer(1, 18))
         story.append(_section_header(
             "Developments to watch into the next session",
-            "Setups, positioning & event lineups over the coming sessions",
+            "Notable scheduled events beyond the forward calendar",
         ))
         story.append(Spacer(1, 8))
         # Items numbered starting at len(drivers) + 1 so drivers (1-3) and
