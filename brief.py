@@ -255,10 +255,9 @@ Then output ONLY a JSON object (no markdown fences, no preamble, no commentary) 
   ],
   "developments_to_watch": [
     {{
-      "headline": "Short punchy setup-style headline under 18 words. Use **double asterisks** to emphasize key prices/moves/levels (will render red).",
-      "body": "3-5 sentences explaining the setup, what's at stake, and what to watch. Specific, forward-looking, and tied to identifiable market mechanics. May also use **double asterisks** for key emphasis.",
-      "categories": ["RATES", "DURATION", "FED"],
-      "impacted_tickers": ["TICKER1", "TICKER2", "TICKER3"]
+      "headline": "Short headline under 16 words. Use **double asterisks** to emphasize a key price/level (will render red).",
+      "body": "1-2 brief sentences describing the setup and what to watch. Concise, not exhaustive.",
+      "categories": ["RATES", "FED"]
     }}
   ]
 }}
@@ -271,11 +270,10 @@ Rules:
 - Make headlines specific enough that someone searching for them on Google News will find the actual articles you're referencing.
 - catalysts_ahead: items scheduled in the next 3 calendar days from today ({sgt_date_str}). Could be 1-6 items depending on what's on the calendar. Include FOMC / Fed meetings and speeches, US government and policy announcements, major economic data releases (CPI, PCE, GDP, NFP, jobless claims, retail sales, etc.), and major upcoming earnings (use real ticker symbols). Use real dates. Order chronologically.
 - market_closures: one entry per (date, holiday) pair. "markets" must be country names only (US, UK, Japan, Korea, Hong Kong, Singapore, China, Eurozone, Australia) — NEVER ticker symbols or index names. Group multiple countries observing the same holiday on the same date into one entry. Cover the FULL week {week_mon_str} to {week_fri_str}: include past closures already in the stale list AND any upcoming closures you find via search. Order chronologically. If no closures, return [].
-- developments_to_watch: exactly 3 setup-style items describing what to watch into upcoming sessions (next session through ~1-2 weeks out). These are forward-looking SETUPS — positioning, levels, breach watches, event setups — distinct from completed drivers above and from daily-calendar catalysts. Each item should describe an identifiable market mechanic: a curve setup into a key data print, a positioning unwind into a holiday, a binary level being tested, an event lineup that compresses risk, a rumored or scheduled corporate event (IPO, M&A, antitrust ruling, major product launch, central bank meeting beyond next 3 days, OPEC, etc.). Order by importance.
-  - headline: under 18 words, specific. Use **markdown** for 1-2 key emphases.
-  - body: 3-5 sentences, forward-looking, mechanics-focused. Use **markdown** for key numbers/levels.
-  - categories: 2-4 short uppercase tags separated as array. Pick from common buckets like: RATES, DURATION, FED, FOMC, INFLATION, MACRO, GROWTH, GDP, CPI, PCE, EARNINGS, AI, TECH, SEMIS, HBM, MEGACAP, CONSUMER, ENERGY, OIL, COMMODITIES, GOLD, M&A, IPO, ANTITRUST, REGULATION, ASIA, EM, CHINA, JAPAN, KOREA, INDIA, HOLIDAY, GEOPOLITICS, ELECTION, TARIFFS, TRADE, USD, FX, JPY, VOLATILITY, RISK, BREACH, POSITIONING. You may invent additional short tags if needed.
-  - impacted_tickers: 3-6 real ticker symbols relevant to the setup. May include US and international symbols (e.g., 005930.KS, 2330.TW). Standard symbols only; never invent.
+- developments_to_watch: exactly 2 brief setup-style items describing what to watch into upcoming sessions (next session through ~1-2 weeks out). These must be DISTINCT from everything else in this brief — do NOT repeat any of the 3 drivers above, and do NOT restate items already listed in catalysts_ahead or market_closures. If a topic is already covered as a driver or calendar item, pick something different. These are forward-looking SETUPS — positioning, a level being tested, a rumored/scheduled corporate event (IPO, M&A, antitrust ruling, major product launch, central-bank meeting beyond the next 3 days, OPEC, etc.), or a sector inflection — that aren't yet the day's story but could become one.
+  - headline: under 16 words, specific. Use **markdown** for 1 key emphasis if helpful.
+  - body: 1-2 brief sentences. Just enough to orient the reader on what the setup is and what to watch. Do NOT write a comprehensive analysis.
+  - categories: 2-3 short uppercase tags as an array. Pick from common buckets like: RATES, DURATION, FED, FOMC, INFLATION, MACRO, GROWTH, GDP, CPI, PCE, EARNINGS, AI, TECH, SEMIS, HBM, MEGACAP, CONSUMER, ENERGY, OIL, COMMODITIES, GOLD, M&A, IPO, ANTITRUST, REGULATION, ASIA, EM, CHINA, JAPAN, KOREA, INDIA, HOLIDAY, GEOPOLITICS, ELECTION, TARIFFS, TRADE, USD, FX, JPY, VOLATILITY, RISK, BREACH, POSITIONING. You may invent additional short tags if needed.
 - Output ONLY the JSON object. Nothing before or after."""
 
 
@@ -642,10 +640,6 @@ def _build_development_item(num, dev):
         "dev_body", fontName="Helvetica", fontSize=9.5,
         textColor=COL_TEXT, leading=14,
     )
-    imp_style = ParagraphStyle(
-        "dev_imp", fontName="Helvetica", fontSize=9,
-        textColor=COL_TEXT, leading=12,
-    )
 
     headline_html = _highlight_emphasis(
         f'<b>{num}.</b>&nbsp;&nbsp;{dev.get("headline", "")}'
@@ -676,34 +670,7 @@ def _build_development_item(num, dev):
 
     body_para = Paragraph(body_html, body_style)
 
-    # Impacted tickers — verified percentages render colored
-    impacted_para = None
-    tickers = dev.get("impacted_tickers") or []
-    if tickers:
-        parts = []
-        for t in tickers:
-            if isinstance(t, dict) and "pct" in t and "symbol" in t:
-                hx = "#0f7a3a" if t["pct"] >= 0 else "#b8243c"
-                sign = "+" if t["pct"] >= 0 else "−"
-                parts.append(
-                    f'<b>{t["symbol"]}</b> '
-                    f'<font color="{hx}"><b>{sign}{abs(t["pct"]):.2f}%</b></font>'
-                )
-            else:
-                sym = t.get("symbol", "") if isinstance(t, dict) else str(t)
-                if sym:
-                    parts.append(f"<b>{sym}</b>")
-        if parts:
-            impacted_html = (
-                '<font color="#a01d2e"><b>Impacted tickers:</b></font>&nbsp;&nbsp;'
-                + "  ·  ".join(parts)
-            )
-            impacted_para = Paragraph(impacted_html, imp_style)
-
     cell_contents = [title_row, Spacer(1, 4), body_para]
-    if impacted_para is not None:
-        cell_contents.append(Spacer(1, 6))
-        cell_contents.append(impacted_para)
 
     outer = Table(
         [["", cell_contents]],
@@ -1008,8 +975,7 @@ def main():
 
     print("Verifying impacted tickers against yfinance...")
     drivers = verify_drivers(brief_data["drivers"])
-    # Reuse verify_drivers on developments_to_watch — same impacted_tickers shape
-    developments = verify_drivers(brief_data.get("developments_to_watch") or [])
+    developments = brief_data.get("developments_to_watch") or []
 
     print("Building PDF...")
     pdf_path = f"/tmp/market-brief-{sgt_date.isoformat()}.pdf"
