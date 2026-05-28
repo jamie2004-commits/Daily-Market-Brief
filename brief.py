@@ -263,7 +263,15 @@ Then output ONLY a JSON object (no markdown fences, no preamble, no commentary) 
 }}
 
 Rules:
-- Exactly 3 drivers, ordered by market impact. Each driver MUST be tied to meaningful price action — typically a 1%+ move in major names, a notable sector move, or a clear inflection in a major index, yield, or commodity. A story being merely newsworthy is NOT enough; if markets didn't react, do not promote it to a driver. If you can't find three high-impact stories, choose the next-most-impactful even if smaller, but never include throwaway commentary or routine policy meetings with negligible market reaction. Prioritize stories from the most recent 24-48 hours when impact is comparable.
+- Exactly 3 drivers, ordered by market impact. A story being merely newsworthy is NOT enough; if markets didn't react, do not promote it to a driver. Each driver MUST satisfy at least ONE of the following inclusion criteria:
+  - Index move > 0.75%, or a sector ETF move > 1.5%
+  - Single-stock move > 5% in a Magnificent 7 name, an S&P 100 constituent, or a major Asia heavyweight
+  - Commodity move > 3%
+  - Yield move > 5 bp, or a 30Y key-level breach
+  - A central-bank decision, or an on-cycle macro release (CPI, PCE, NFP, GDP; jobless claims only if a genuine shock)
+  - A geopolitical event with clear energy / safe-haven / risk-asset transmission (e.g. Strait of Hormuz, Taiwan Strait, Korean peninsula, US-China tariffs, Russia-Ukraine)
+  - A major corporate event in a heavyweight name (earnings beat/miss WITH a stock move, M&A, or a guidance change)
+  If you genuinely cannot find three stories meeting any of the above, choose the next-most-impactful even if it falls slightly short, but never include throwaway commentary or routine policy meetings with negligible market reaction. Prioritize stories from the most recent 24-48 hours when impact is comparable.
 - For driver headlines AND bodies, you may use **double asterisks** sparingly to highlight the 1-3 most important numbers/moves/levels (e.g., "Brent **−7%**", "**30Y 5.20% breach**"). These render as bold red in the PDF. Use only for genuinely market-moving figures, not decorative emphasis.
 - impacted_tickers (drivers): 3-5 real US-listed ticker symbols per driver. Standard symbols only (AAPL, NVDA, JPM, XLE, etc.). Never invent tickers.
 - source_url and source_title: ALWAYS fill these from the curated Marketaux articles above whenever the driver is supported by one of them. If no curated article covers the story, leave both as empty strings (the PDF will fall back to a Google News search link). NEVER use a Vertex/grounding redirect URL — only real direct article URLs.
@@ -728,7 +736,6 @@ def build_pdf(out_path, sgt_date_str, us_close_str, prices, drivers, catalysts,
     story = []
     story.append(Paragraph("DAILY MARKET BRIEF", eyebrow))
     story.append(Paragraph(sgt_date_str, h1))
-    story.append(Paragraph(f"Post-close summary · US session of {us_close_str}", muted))
     story.append(HRFlowable(width="100%", thickness=0.5, color=COL_BORDER,
                             spaceBefore=4, spaceAfter=14))
 
