@@ -1099,16 +1099,26 @@ def _build_forward_calendar(sgt_date, catalysts, closures, lang="en"):
     return tbl, overflow_events, overflow_closures
 
 
-def _highlight_emphasis(text, color="#a01d2e"):
-    """Convert **markdown** emphasis to bold red HTML for ReportLab Paragraphs.
-    Safe no-op when no asterisks are present."""
+def _highlight_emphasis(text, color="#1a1a1a"):
+    """Convert **markdown** emphasis to bold HTML for ReportLab Paragraphs.
+    Figures are colour-coded by sign so they read intuitively: green for gains
+    (a leading +), red for losses (a leading − or -), and a neutral dark tone
+    for unsigned figures. Safe no-op when no asterisks are present."""
     if not text:
         return text
-    return re.sub(
-        r"\*\*([^*]+?)\*\*",
-        rf'<font color="{color}"><b>\1</b></font>',
-        text,
-    )
+
+    def _repl(m):
+        inner = m.group(1)
+        if re.search(r"\+\s*\d", inner):
+            c = "#0f7a3a"   # gain → green
+        elif re.search(r"[−-]\s*\d", inner):
+            c = "#b8243c"   # loss → red
+        else:
+            c = color       # unsigned (e.g. "1.6%", "5.20% breach") → neutral
+        return f'<font color="{c}"><b>{inner}</b></font>'
+
+    return re.sub(r"\*\*([^*]+?)\*\*", _repl, text)
+
 
 
 def _build_development_item(num, dev, lang="en"):
